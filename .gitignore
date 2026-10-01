@@ -1,0 +1,12 @@
+/target/
+/dist/
+/.codegraph/
+.DS_Store
+
+/.remote-fixture-venv/
+/.remote-fixture-data/
+
+/.appearance-fixture-data/
+
+__pycache__/
+*.py[cod]
