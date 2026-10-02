@@ -15,6 +15,16 @@ The initial target is macOS, while keeping provider and UI boundaries portable w
 - Drag/drop: files between panes and external app surfaces when the platform API permits. Make the operation explicit; default to copy for ambiguous cross-provider drops. Keep keyboard/menu alternatives.
 - Keyboard help: a grouped, scrollable shortcuts modal toggled by `Cmd+?`, also available through Help and the command palette. Preserve typing in inputs and terminals, block underlying actions while open, and restore the previous focus when dismissed.
 
+## Optional Vim interaction
+
+Settings → Interaction exposes a persisted, default-off Vim mode scoped to
+file listings. NORMAL and VISUAL state, pending sequences/counts and inline
+search/command entry appear in the status bar. The keymap in README.md covers
+navigation, selection, search, history, tabs, folder trees, directional pane
+focus/splits and reviewed file operations. Inputs, terminals and modals retain
+their normal keys; existing macOS shortcuts remain available. Vim delete and
+copy use the existing review/confirmation flows.
+
 ## Additional pane splits
 
 The workspace starts with two side-by-side pane groups. Split the focused pane

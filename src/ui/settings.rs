@@ -223,6 +223,11 @@ impl Workspace {
             .child(section("FILE LIST"))
             .child(row().child(label("Row density","Adjust the space around filenames without changing their order or selection."))
                 .child(div().w(px(260.)).flex_none().flex().flex_col().gap_2().children([("Compact","density-compact",RowDensity::Compact),("Comfortable","density-comfortable",RowDensity::Comfortable),("Spacious","density-spacious",RowDensity::Spacious)].into_iter().map(|(name,id,density)|self.setting_choice(id,name,appearance.row_density==density,Command::Density(density),cx)))))
+            .child(section("INTERACTION"))
+            .child(row().child(label("Vim mode","Vim keys apply to the file listing. Inputs, terminals, and dialogs keep their usual keys."))
+                .child(div().w(px(260.)).flex_none().flex().flex_col().gap_2()
+                    .child(self.setting_choice("settings-vim-mode",if self.preferences.vim_mode { "Enabled" } else { "Disabled" },self.preferences.vim_mode,Command::ToggleVim,cx))
+                    .child(div().text_size(px((font - 1.).max(10.))).text_color(rgb(theme.muted)).child("Press ? in the file listing for keyboard help."))))
             .child(div().pt_5().flex().items_center().gap_4().child(self.setting_choice("reset-appearance","Reset appearance",false,Command::ResetAppearance,cx)).child(div().flex_1().text_color(rgb(theme.muted)).child("Changes save automatically. Pane locations and transfers stay intact.")))
             .when(!self.preferences_writable,|d|d.child(div().pt_3().text_color(rgb(theme.warning)).child("Settings could not be loaded safely. Changes preview for this session; the original JSON file is preserved.")))
             .when_some(self.notice.as_ref(),|d,notice|d.child(div().pt_3().text_color(rgb(theme.warning)).child(notice.clone())));
@@ -262,7 +267,7 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(div().text_size(px(font + 5.)).child("Appearance"))
+                            .child(div().text_size(px(font + 5.)).child("Settings"))
                             .child(
                                 div()
                                     .text_size(px((font - 1.).max(10.)))

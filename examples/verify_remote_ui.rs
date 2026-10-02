@@ -24,6 +24,8 @@ mod terminal;
 mod transfers;
 #[path = "../src/ui/mod.rs"]
 mod ui;
+#[path = "../src/updater.rs"]
+mod updater;
 use connections::{ConnectionRecord, ConnectionSecrets, Protocol};
 use gpui_kit::{prelude::*, *};
 use providers::ProviderRegistry;
@@ -75,6 +77,8 @@ fn record(protocol: Protocol, ca: &str) -> ConnectionRecord {
         } else {
             String::new()
         },
+        group: String::new(),
+        ssh_key_path: String::new(),
     }
 }
 fn prepare() -> Result<ProviderRegistry, String> {
@@ -113,6 +117,7 @@ fn prepare() -> Result<ProviderRegistry, String> {
         access_key: "fixture".into(),
         secret_key: "fixture-secret".into(),
         session_token: String::new(),
+        ssh_key_passphrase: String::new(),
     };
     Ok(ProviderRegistry::with_connections(
         records

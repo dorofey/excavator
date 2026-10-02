@@ -4,6 +4,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub(super) enum OperationDialog {
     Plan(OperationPlan),
+    Conflict(JobId, Location, Location),
     Replace(JobId, Location, Location),
 }
 pub(super) fn operation_name(operation: Operation) -> &'static str {
@@ -93,9 +94,9 @@ impl Workspace {
         self.run_transfers(cx);
     }
 
-    pub(super) fn start_transfer_poll(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn start_transfer_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let manager = self.transfers.clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(180))
@@ -106,7 +107,7 @@ impl Workspace {
                     .spawn(async move { snapshot_manager.snapshots() })
                     .await;
                 if this
-                    .update(cx, |this, cx| {
+                    .update_in(cx, |this, window, cx| {
                         let changed = jobs.iter().any(|job| {
                             this.jobs
                                 .iter()
@@ -128,7 +129,28 @@ impl Workspace {
                                 .is_none_or(|old| old.state != job.state)
                         });
                         this.jobs = jobs;
+                        if let Some(OperationDialog::Conflict(id, ..) | OperationDialog::Replace(id, ..)) = &this.operation_dialog {
+                            if !this.jobs.iter().any(|job| job.id == *id && matches!(job.state, JobState::AwaitingConflict { .. })) {
+                                this.operation_dialog = None;
+                                this.activate(this.active, window, cx);
+                            }
+                        }
+
+                        if this.operation_dialog.is_none() && this.connection_screen.is_none()
+                            && !this.settings_open && !this.palette && !this.shortcuts_open {
+                            if let Some((id, source, destination)) = this.jobs.iter().find_map(|job| {
+                                if let JobState::AwaitingConflict { source, destination } = &job.state {
+                                    Some((job.id, source.clone(), destination.clone()))
+                                } else { None }
+                            }) {
+                                this.operation_dialog = Some(OperationDialog::Conflict(id, source, destination));
+                                this.operation_focus.focus(window, cx);
+                                cx.notify();
+                            }
+                        }
                         if finished {
+                            this.sftp_listing_cache.clear();
+                            this.listing_cache_epoch += 1;
                             for i in this.panes.ids() {
                                 let active = this.panes[i].active;
                                 for tab in 0..this.panes[i].tabs.len() {
@@ -192,10 +214,20 @@ impl Workspace {
             return;
         }
         let tab = self.panes[self.active].tab();
-        let sources = tab
+        let selected = tab
             .selected
             .iter()
             .filter_map(|row| tab.entries.get(*row).map(|e| e.location.clone()))
+            .collect::<Vec<_>>();
+        // Expanded tree rows can select a folder and its contents; act on the folder once.
+        let sources = selected
+            .iter()
+            .filter(|location| {
+                !selected
+                    .iter()
+                    .any(|other| super::tree::is_descendant(location, other))
+            })
+            .cloned()
             .collect::<Vec<_>>();
         if operation != Operation::CreateDirectory && sources.is_empty() {
             self.notice = Some("Select the items to operate on first.".into());
@@ -216,7 +248,9 @@ impl Workspace {
             String::new()
         };
         let destination = match operation {
-            Operation::CreateDirectory | Operation::Rename => Some(tab.path.clone()),
+            Operation::CreateDirectory => Some(tab.path.clone()),
+            // Nested tree rows rename within their own folder, not the pane root.
+            Operation::Rename => Some(sources[0].parent().unwrap_or_else(|| tab.path.clone())),
             Operation::Copy | Operation::Move => {
                 Some(self.panes[self.transfer_target()].tab().path.clone())
             }
@@ -286,6 +320,7 @@ impl Workspace {
                 self.transfers.enqueue(plan);
                 self.run_transfers(cx);
             }
+            OperationDialog::Conflict(..) => return,
             OperationDialog::Replace(id, _, destination) => {
                 if !destination.is_local() {
                     self.notice = Some(
@@ -314,10 +349,14 @@ impl Workspace {
         self.transfers.resolve_conflict(id, policy);
         self.run_transfers(cx);
     }
-    pub(super) fn render_operation_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_operation_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.colors;
         let dialog = self.operation_dialog.as_ref().unwrap();
+        if let OperationDialog::Conflict(id, source, destination) = dialog {
+            return self.render_conflict_modal(*id, source, destination, cx);
+        }
         let (title, paths, input, label) = match dialog {
+            OperationDialog::Conflict(..) => unreachable!(),
             OperationDialog::Plan(plan) => {
                 let mut paths = plan.sources.iter().map(|source| format!("Source: {}",source.display())).collect::<Vec<_>>();
                 if let Some(destination) = &plan.destination {
@@ -331,7 +370,7 @@ impl Workspace {
                     paths.push("Sources are removed only after the destination is verified.".into());
                 }
                 let input = matches!(plan.operation, Operation::CreateDirectory | Operation::Rename);
-                let label = if matches!(plan.operation, Operation::Move | Operation::Trash | Operation::Rename) { "Confirm operation" } else { "Queue operation" };
+                let label = match plan.operation { Operation::Copy => "Confirm copy", Operation::Move => "Confirm move", Operation::Delete => "Confirm delete", Operation::Trash => "Move to Trash", Operation::Rename => "Rename", Operation::CreateDirectory => "Create folder" };
                 (operation_name(plan.operation).to_string(), paths, input, label)
             }
             OperationDialog::Replace(_, source, destination) => (
@@ -341,9 +380,12 @@ impl Workspace {
                 "Confirm replace",
             ),
         };
-        div()
+        let panel = div()
             .track_focus(&self.operation_focus)
             .key_context("OperationConfirm")
+            .on_action(cx.listener(|this, _: &ConfirmOperation, window, cx| {
+                this.submit_operation(window, cx);
+            }))
             .flex_none()
             .p_3()
             .bg(rgb(theme.dialog))
@@ -364,28 +406,79 @@ impl Workspace {
                     .flex()
                     .gap_4()
                     .child(
-                        div()
-                            .id("confirm-operation")
-                            .cursor_pointer()
-                            .text_color(rgb(theme.accent))
+                        Button::new("confirm-operation")
+                            .label(format!("{label} · Enter"))
+                            .accessibility_label(label)
                             .on_click(
                                 cx.listener(|this, _, window, cx| {
                                     this.submit_operation(window, cx)
                                 }),
-                            )
-                            .child(format!("{label} · Enter")),
+                            ),
                     )
                     .child(
-                        div()
-                            .id("cancel-operation")
-                            .cursor_pointer()
+                        Button::new("cancel-operation")
+                            .ghost()
+                            .label("Cancel · Esc")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.operation_dialog = None;
                                 this.activate(this.active, window, cx);
-                            }))
-                            .child("Cancel · Esc"),
+                            })),
                     ),
             )
+            .when_some(self.notice.as_ref(), |panel, notice| {
+                panel.child(div().mt_2().text_color(rgb(theme.warning)).child(notice.clone()))
+            });
+        let weak = cx.entity().downgrade();
+        gpui_kit::base::Dialog::new(cx)
+            .focus_handle(self.operation_focus.clone())
+            .on_ok(|_, _, _| false)
+            .close_on_backdrop_press(false)
+            .popup(gpui_kit::base::DialogPopup::new()
+                .w(px(720.)).max_w(gpui::relative(0.95)).rounded_lg().child(panel))
+            .backdrop(div().size_full().bg(rgba(0x00000080)))
+            .on_open_change(move |open, _, window, cx| {
+                if !open {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.operation_dialog = None;
+                        this.activate(this.active, window, cx);
+                        cx.notify();
+                    });
+                }
+            })
+            .into_any_element()
+    }
+    fn render_conflict_modal(&self, id: JobId, source: &Location, destination: &Location, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.colors;
+        let can_replace = self.jobs.iter().find(|job| job.id == id).is_some_and(|job|
+            source.is_local() && destination.is_local() && job.plan.sources.iter().all(Location::is_local)
+                && job.plan.destination.as_ref().is_none_or(Location::is_local));
+        let source = source.clone();
+        let destination = destination.clone();
+        let panel = div().track_focus(&self.operation_focus).key_context("TransferConflict")
+            .p_3().bg(rgb(theme.dialog))
+            .child(div().text_color(rgb(theme.accent)).child("Destination already exists"))
+            .child(div().py_2().child(format!("Source: {}", source.display())))
+            .child(div().py_2().child(format!("Destination: {}", destination.display())))
+            .child(div().text_color(rgb(theme.muted)).child("Choice applies to remaining conflicts in this job. Replacement requires another confirmation."))
+            .child(div().mt_3().flex().gap_2().children([
+                (ConflictPolicy::KeepBoth, "Keep both"), (ConflictPolicy::Skip, "Skip"), (ConflictPolicy::Cancel, "Cancel job")
+            ].into_iter().enumerate().map(|(n, (policy, label))| {
+                Button::new(("modal-conflict-choice", n)).label(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.resolve(id, policy, cx);
+                        this.operation_dialog = None;
+                        this.activate(this.active, window, cx);
+                    }))
+            })).child(Button::new("modal-review-replace").label("Review replace…").disabled(!can_replace)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.operation_dialog = Some(OperationDialog::Replace(id, source.clone(), destination.clone()));
+                    this.operation_focus.focus(window, cx);
+                    cx.notify();
+                }))));
+        gpui_kit::base::Dialog::new(cx).focus_handle(self.operation_focus.clone())
+            .on_ok(|_, _, _| false).close_on_escape(false).close_on_backdrop_press(false)
+            .popup(gpui_kit::base::DialogPopup::new().w(px(720.)).max_w(gpui::relative(0.95)).rounded_lg().child(panel))
+            .backdrop(div().size_full().bg(rgba(0x00000080))).into_any_element()
     }
     pub(super) fn render_transfers(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.colors;
@@ -459,7 +552,7 @@ impl Workspace {
                 if let Some(current) = &job.current {
                     row = row.child(div().text_color(rgb(theme.muted)).child(current.display()));
                 }
-                if let Some(error) = &job.error {
+                if let Some(error) = job.error.as_ref().filter(|_| !matches!(job.state, JobState::AwaitingConflict { .. })) {
                     row = row.child(div().text_color(rgb(theme.error)).child(error.to_string()));
                 }
                 if let JobState::AwaitingConflict {
@@ -467,69 +560,15 @@ impl Workspace {
                     destination,
                 } = &job.state
                 {
-                    let can_replace = source.is_local()
-                        && destination.is_local()
-                        && job.plan.sources.iter().all(Location::is_local)
-                        && job.plan.destination.as_ref().is_none_or(Location::is_local);
                     let source = source.clone();
                     let destination = destination.clone();
-                    row = row
-                        .child(div().py_1().child(format!(
-                            "{} → {}",
-                            source.display(),
-                            destination.display()
-                        )))
-                        .child(
-                            div()
-                                .flex()
-                                .gap_4()
-                                .children(
-                                    [
-                                        (ConflictPolicy::KeepBoth, "Keep both"),
-                                        (ConflictPolicy::Skip, "Skip"),
-                                        (ConflictPolicy::Cancel, "Cancel job"),
-                                    ]
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(
-                                        |(n, (policy, label))| {
-                                            div()
-                                                .id(("conflict-choice", id * 4 + n as u64))
-                                                .cursor_pointer()
-                                                .text_color(rgb(theme.accent))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.resolve(id, policy, cx)
-                                                }))
-                                                .child(label)
-                                        },
-                                    ),
-                                )
-                                .when(can_replace, |actions| {
-                                    actions.child(
-                                        div()
-                                            .id(("replace-conflict", id))
-                                            .cursor_pointer()
-                                            .text_color(rgb(theme.warning))
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.operation_focus.focus(window, cx);
-                                                this.operation_dialog =
-                                                    Some(OperationDialog::Replace(
-                                                        id,
-                                                        source.clone(),
-                                                        destination.clone(),
-                                                    ));
-                                                cx.notify();
-                                            }))
-                                            .child("Review replace…"),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px((font_size - 1.).max(10.)))
-                                .text_color(rgb(theme.muted))
-                                .child("Choice applies to remaining conflicts in this job."),
-                        );
+                    row = row.child(Button::new(("review-conflict", id)).label("Review conflict…")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.operation_dialog = Some(OperationDialog::Conflict(id, source.clone(), destination.clone()));
+                            this.operation_focus.focus(window, cx);
+                            cx.notify();
+                        })));
+
                 }
                 if !job.journal.is_empty() {
                     row = row.children(job.journal.iter().map(|item| {

@@ -34,6 +34,8 @@ user-authorized local-files MVP; OS polish and release readiness remain separate
 - [x] Add editable location/path entry with validation and clear errors.
 - [x] Add command palette search for implemented actions and locations.
 - [x] Add keybindings for pane focus, navigation, tab actions, selection, and command palette; show bindings in UI.
+- [x] Add grouped keyboard-shortcuts help with Cmd+? toggle, file-list ? entry, Help menu and palette access; trap focus and preserve the previous view.
+- [ ] Finish keyboard-help native scroll, narrow-window and text-field restoration acceptance; native capture became stale during the final fixture check.
 - [x] Persist non-secret favorites and workspace preferences; handle corrupt or older settings safely.
 
 ## 4. Safe local file operations and transfer queue
@@ -121,4 +123,101 @@ is not claimed.
 ## 9. Future interaction enhancements
 - [x] Allow splitting a pane horizontally or vertically into additional independently navigable panes with resizable dividers; expose split, close-split, and focus actions through menus, the command palette, and discoverable shortcuts, preserving each pane's tabs, history, and selection. Command assertions and rendered nested-pane interaction evidence are recorded in DECISIONS.md; extra splits are session-only.
 - [x] Add an integrated terminal window with keyboard-accessible show/hide and focus actions; define how local working directories and SSH sessions relate to the active pane. Per-pane terminal tabs and fresh terminal splits passed real PTY, multi-session Workspace and rendered typing/focus/split/end checks. Live SSH and full clipboard-paste acceptance remain unverified. See DECISIONS.md.
-- [ ] Evaluate an optional Vim mode for file navigation and selection; define modes, discoverable bindings, and interactions with text inputs and existing shortcuts before implementation.
+- [x] Define and implement optional Vim mode for listing navigation, counts, visual/marked selection, search, history, tabs, tree expansion, directional pane focus/splits, and reviewed file operations; persisted Settings → Interaction toggle defaults off. Bindings appear in shortcut help and the status bar shows NORMAL/VISUAL or search/command entry.
+- [ ] Complete native Vim acceptance across all bindings, inputs/terminals/modals, settings restart persistence, and split geometry. Build and code review passed; native preview automation returned mismatched screenshots and then an inactive-surface error, so rendered acceptance is not claimed.
+
+## 10. Zed-style interaction refinements (user feedback, 2026-10-01)
+- [x] Closing the last tab of a pane closes that pane split; the sole pane on each original side keeps its last tab (protected, with a notice). Verified in the rendered app and in `verify_splits_ui`.
+- [x] Render Nerd Font / Powerline glyphs in terminals via installed Nerd Font fallbacks instead of missing-glyph boxes. A real Powerline prompt and explicit `nf-*` code points rendered in the signed app.
+- [x] Make the sidebar vertically scrollable and horizontally resizable (120–480 px divider); keep long names on one line with ellipsis. Keyboard focus, expansion and scrolling verified; pointer drag of the divider is not yet exercised.
+- [x] New-tab (+) supports Option-click to split down and Shift-Option-click to split right, with tooltip hints. Terminal creation has a separate button. Build passed; modifier branches are not pointer-verified.
+- [x] Show Zed-like folder and file-type icons in listings and sidebar, using selected bundled Lucide icons (no full-catalog embed, no copied Zed assets).
+- [x] Show file listings as a tree: chevron click or →/← expands/collapses folders inline with indent guides; double-click/Enter still navigates into a folder; expansions load asynchronously, reject stale results, and survive refresh; operations act on the selected rows' real locations (rename stays in the item's own folder). Expand/collapse and indent verified in the rendered app.
+- [x] Make sidebar favorites and saved connections expandable trees of subfolders (asynchronous, cancellable on collapse, errors shown inline); clicking a node opens it in the active pane. Keyboard tree navigation (⌘⌥S, ↑↓, →←, Return, Esc) verified in the rendered app.
+- [x] Collapse the top toolbar into a Zed-like transparent title bar beside the traffic lights (compact back/forward/parent icons and a command search entry); drop the separate Refresh button row (⌘R and palette remain).
+- [x] Present the command palette as a floating, centered modal with a bounded scrolling list, highlighted selection, ↑/↓ navigation, Enter to run, Esc/backdrop to dismiss, and shortcut labels. Verified in the rendered app, including running a command from it.
+- [x] Plain title bar (window controls only) with one full-width tab row at the very top: every pane's strip aligned above its pane from live resizable sizes; Refresh removed entirely. Geometry asserted in `verify_splits_ui`; the rendered screenshot for this change could not be captured (screen capture returned black frames on this host).
+- [ ] Verify the remaining pointer-only items in the rendered app: sidebar divider drag, ⌥-click and ⇧⌥-click on +, and title-bar window drag/double-click.
+
+2026-10-02 alignment correction: the sidebar search width now subtracts the
+title bar's existing traffic-light inset, and tab geometry uses the remaining
+workspace width. `cargo check --locked --offline` and macOS bundle build passed;
+rendered acceptance of the corrected alignment remains pending.
+
+2026-10-02 tab controls: new-file-tab and new-terminal buttons sit at each
+pane strip's right edge with a separately scrollable tab list. Tabs show
+file-tree/terminal icons and location-only labels. The macOS bundle build
+passed; rendered placement and button interaction acceptance remain pending.
+
+Lower split panes now render their own tab strips; only panes touching the
+workspace top edge use the title bar. Terminal creation supports the same
+Option-click down / Shift-Option-click right split modifiers. The terminal
+path/Files/End header is removed. Rendered acceptance remains pending.
+
+2026-10-02 sidebar and connection modals: compact collapsible Favorites →
+Folder, Connected Disks → Disk, Connections → Group → Connection hierarchy;
+mounted disks load asynchronously. Connection manager supports adding/renaming
+groups and choosing a group in the editor, including groups from older metadata.
+Popup click isolation and stable focus corrected connection editing. Native
+capture confirmed the hierarchy, manager/editor/group modals and typing in an
+existing connection name and group draft; both drafts were cancelled. Build
+passed. Group save/rename persistence and final focus restoration are not
+yet exercised through the native UI.
+
+Connection editor inputs now use explicit 32 px height, 10 px horizontal /
+4 px vertical padding and the configured UI font size, with even field spacing.
+The signed bundle build passed; final rendered padding acceptance is pending.
+
+SFTP authentication now tries the SSH agent if loading/authenticating with the
+selected private key fails, after host verification. Build passed; the user's
+external SSH login succeeds, but Excavator's agent-backed login remains unverified.
+
+Explicit Enter/double-click on local/SFTP folder symlinks resolves the target
+asynchronously and navigates to its actual path; stale responses are discarded.
+Transfers retain their no-follow behavior. Path inputs use explicit height,
+padding and UI font size to avoid clipped text. Bundle build passed; live
+symlink navigation and final rendered path-input acceptance remain pending.
+
+Pane path bars now show clickable provider-aware ancestor breadcrumbs. Remote
+roots use the saved connection name; Cmd+L or the ellipsis button reveals the
+editable path. Bundle build passed; native breadcrumb interaction is pending.
+
+SFTP root listings now use a session-only stale-while-revalidate cache keyed
+by location/connection and hidden-file preference. Revisits display cached
+rows immediately and refresh in the background; refresh failures retain rows
+with a visible stale/error notice. Selection survives replacement by location.
+The cache is bounded to 64 listings / 50,000 entries, skips listings over
+10,000 entries, and clears after operation completion or connection changes.
+Generation and cache-epoch checks prevent obsolete results from repopulating it.
+Build passed; live SFTP Back/Forward latency and failure acceptance are pending.
+
+Directory loading and SWR progress use a spinner in a reserved path-bar slot
+beside Edit Path. Removed loading/refreshing text rows to keep listing geometry
+stable; refresh errors remain visible. Bundle build passed; native spinner
+animation/placement acceptance is pending.
+
+Tabs can be dragged between panes/splits, dropped before another tab to reorder,
+or dropped onto a pane/tab strip to append. Existing terminal entities and tab
+state move intact; asynchronous listing/tree responses locate the current pane
+by stable tab ID. Moving the last tab collapses an extra split or leaves a fresh
+file tab on a protected original side. Command palette includes Move tab to next
+pane. Build passed; native pointer drag/session continuity acceptance is pending.
+
+Operation review now uses a centered confirmation modal with a dimmed backdrop,
+source/destination details, explicit confirm/cancel buttons and Enter/Esc.
+Underlying pane commands are blocked until review closes; validation errors
+stay inside the modal. Bundle build passed; native modal interaction is pending.
+
+2026-10-02 confirmation audit: transfer conflicts now automatically open a
+centered decision modal with source/destination, Keep both, Skip, Cancel job and
+separate replacement review. The drawer retains a compact Review conflict
+entry. Copy/move/delete/Trash/rename/create-folder, ForkLift import, SSH trust,
+connection removal and saved-host reset already use modals. Native conflict
+interaction remains pending; no destructive operation was exercised.
+
+2026-10-02 release preparation: 0.2.0 changelog, versioned optimized macOS
+packaging and Sparkle 2.10.0 integration added. Archive signing key generated
+in Keychain; only its public key is committed. In-app Check for Updates is
+available from the app menu and palette. Update-enabled bundles require macOS
+12. Developer ID/notarization, native install/relaunch and release-readiness
+acceptance gates remain unchecked.

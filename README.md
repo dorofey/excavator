@@ -8,9 +8,22 @@ Remote connections support SFTP, encrypted FTPS, and S3 object storage.
 Either initial pane can be split repeatedly to the right or below, with
 independent tabs, history, selection, and resizable dividers.
 
-Sidebar and transfer-drawer toggles are compact panel icons at the bottom right
-of the status bar. Tab-close icons appear when a tab is hovered or the close
-button has keyboard focus; their space stays reserved so tab labels do not shift.
+The window opens straight into a full-width tab row under a plain title bar:
+every pane's tabs sit above that pane, aligned to the pane's live width. The
+title bar keeps only the window controls; back, forward, parent, refresh and the
+command palette stay on ⌘[, ⌘], ⌘↑, ⌘R and ⌘⇧P, and the palette is a floating
+modal (↑/↓, Return, Esc). Folders expand inline as a tree — click the chevron or
+press →/←, while double-click or Return still opens the folder. Listings and the
+sidebar show file-type icons.
+
+The sidebar scrolls vertically, resizes by dragging its divider (120–480 px),
+and expands favorites, locations and connections into folder trees. Focus it
+with ⌘⌥S; ↑/↓ move, →/← expand and collapse, Return opens in the active pane and
+Esc returns to the panes. Sidebar and transfer-drawer toggles are compact panel
+icons at the bottom right of the status bar. Tab-close icons appear when a tab is
+hovered or the close button has keyboard focus; their space stays reserved so tab
+labels do not shift. Use the separate terminal button for a terminal tab. Option-click either new-tab
+button to split down; Shift-Option-click splits right.
 
 ## Run and build
 
@@ -24,9 +37,14 @@ The script creates an ad-hoc signed Apple Silicon development bundle, not a
 notarized release. It converts `assets/excavator-icon.png` into the standard
 macOS icon sizes and bundles `Excavator.icns` with its plist registration.
 GPUI Kit is pinned to 0.7.0; the lockfile pins its compatible
-GPUI family. The binary targets macOS 11.0 or later; older OS versions are untested.
+GPUI family. The binary targets macOS 12.0 or later; older OS versions are untested.
 
 ## Keyboard
+
+Open grouped shortcut help with **⌘?** (**⌘⇧/**), the Help menu, or
+the command palette. **?** also opens it from a file list. Escape or ⌘?
+closes it and restores focus. Scroll or use arrow/Page Up/Page Down keys
+to browse the groups; question marks remain normal text in inputs and shells.
 
 | Action | Shortcut |
 | --- | --- |
@@ -38,13 +56,18 @@ GPUI family. The binary targets macOS 11.0 or later; older OS versions are untes
 | Close active split | ⌘⌥W |
 | Adjust nearest divider | Ctrl Alt ← / Ctrl Alt → |
 | Select / extend selection | ↑↓ / ⇧↑↓ |
+| Expand / collapse folder row | → / ← |
+| Focus sidebar | ⌘⌥S |
+| Sidebar move / expand / open | ↑↓ / →← / Return |
 | Select all | ⌘A |
 | Open selected folder or file | Return |
 | Edit location | ⌘L |
 | Choose folder for active pane | ⌘O |
 | Back / forward / parent | ⌘[ / ⌘] / ⌘↑ |
 | Refresh | ⌘R |
-| New / close tab | ⌘T / ⌘W |
+| New tab | ⌘T |
+| New terminal tab | ⌘⌥T or ⇧-click + |
+| Close tab | ⌘W (closes the split when it is the pane's last tab) |
 | Next / previous tab | Ctrl Tab / Ctrl Shift Tab |
 | Reorder current tab | ⌘⇧[ / ⌘⇧] |
 | Toggle sidebar / hidden files | ⌘B / ⌘⇧. |
@@ -70,8 +93,9 @@ restores the two original sides using their first surviving pane's saved locatio
 
 `cargo run --locked --example verify_splits_ui` opens an isolated four-pane
 acceptance window and checks real split, close, focus, state preservation,
-cancellation, stale-drag rejection, and transfer-destination commands. It does
-not load saved preferences, connections, or credentials. Close it with ⌘Q.
+cancellation, stale-drag rejection, transfer-destination commands, last-tab split
+closing, and tree row/selection/stale-expansion handling. It does not load saved
+preferences, connections, or credentials. Close it with ⌘Q.
 
 ## Checks
 
@@ -116,6 +140,9 @@ file to system Trash and prints its recovery name.
 - Partial copies can leave destination directories; the journal explains them.
   Replacement backups remain for manual recovery.
 - Cancellation is cooperative; external changes can race OS calls.
+- Expanded folders load on demand per pane. Expansions are session-only, are
+  cleared when a pane navigates, and reload after ⌘R. Terminal glyphs resolve
+  through installed Nerd Font families when present.
 - VoiceOver speech, reduced-motion behavior, transient button states,
   multi-item Finder drops, outbound drag behavior, large-directory performance,
   clean-user installation, older macOS versions, and notarization remain outside
@@ -133,6 +160,10 @@ Passwords and S3 keys belong to macOS Keychain; metadata is stored separately in
 `~/Library/Application Support/Excavator/connections.json`. Missing or locked
 credentials are reported with an edit/recovery action. There is no plaintext
 credential fallback.
+
+SFTP can authenticate with a password or an OpenSSH-compatible private-key file.
+The key remains at its local path; an optional key passphrase is stored in Keychain.
+When a key is configured, a password credential is not required.
 
 SFTP verifies an SHA256 host-key fingerprint before authentication. Compare the
 first fingerprint through a trusted channel. Changed keys are rejected; forgetting
@@ -169,6 +200,32 @@ Physical Keychain save/readback/cleanup was exercised in the signed app with
 disposable SFTP and S3 credentials. Ordinary connection errors surface in the
 app, with no plaintext credential fallback.
 
+## Vim mode
+
+Enable **Settings → Interaction → Vim mode** (`Cmd+,`). It defaults off and
+applies only while a file listing has focus. Inputs, terminals and dialogs keep
+their usual keys. The command palette also offers **Toggle Vim mode**.
+
+| Keys | Action |
+|---|---|
+| `j` / `k`, `gg` / `G` | Move down/up, first/last; counts such as `5j` and `5G` |
+| `h` / `l` / Enter | Parent folder / open selected item |
+| `Ctrl+d` / `Ctrl+u` | Half-page down/up |
+| `za` / `zo` / `zc` | Toggle/expand/collapse folder tree |
+| `v`, Space, Esc | Range selection, toggle marked item, leave mode then clear selection |
+| `/`, `n` / `N` | Search visible filenames, next/previous match |
+| `Ctrl+o` / `Ctrl+i` | Folder history back/forward |
+| `gt` / `gT` | Next/previous tab |
+| `Ctrl+w` then `h/j/k/l` | Focus a pane left/down/up/right |
+| `Ctrl+w` then `s/v/c` | Split below/right, close split |
+| `yy` / `dd` | Review copy to another pane / permanent delete confirmation |
+| `:rename`, `:refresh`, `:help` | Rename dialog, refresh listing, shortcut help |
+| `?` | Shortcut help |
+
+Search and commands appear in the existing status bar; Enter applies them and
+Esc cancels them. Space marks survive cursor movement. File-operation
+confirmations and protected original panes retain their existing behavior.
+
 ## Appearance settings
 
 Open Settings from the Excavator menu, the command palette, or ⌘,. The page
@@ -203,7 +260,7 @@ selects the system font. Unavailable families use the platform's font fallback.
 Reset appearance restores these defaults and retains workspace preferences.
 
 The other supported keys are `version`, `favorites`, `left`, `right`,
-`show_hidden`, and `sidebar_visible`. Native paths are written as byte arrays
+`show_hidden`, `sidebar_visible`, and `vim_mode` (boolean, default `false`). Native paths are written as byte arrays
 to preserve filenames that are not valid UTF-8; legacy string paths remain
 readable. Version 1 migrates in memory while retaining favorites, local pane
 locations, and visibility flags; the next explicit change writes version 2.
@@ -265,3 +322,35 @@ when first connecting. Missing paths default to `/` and missing ports to 22.
 
 `cargo run --locked --example verify_forklift` checks generated archives,
 protocol skips, duplicates, malformed data and credential exclusion.
+
+## Releases and updates
+
+See [CHANGELOG.md](CHANGELOG.md) for user-facing changes. The Apple Silicon
+0.2.0 prerelease is ad hoc signed and not notarized. Release builds include
+Sparkle 2.10.0 for **Excavator → Check for Updates…** and the command palette.
+Sparkle provides download, signature verification, installation and relaunch.
+It asks about automatic update checks. Debug builds omit Sparkle unless
+`EXCAVATOR_UPDATE_PUBLIC_KEY` is provided.
+
+The public feed is `appcast.xml` on this repository's `main` branch; archives
+are GitHub release assets. Archives are signed with the `excavator` Sparkle
+Ed25519 key in the release maintainer's macOS Keychain. Only the public key is
+committed. Preserve that Keychain key for future releases; do not export private
+keys into the repository. No GitHub credential is bundled in the application.
+
+To prepare the next release:
+
+1. Bump the package version in Cargo.toml/Cargo.lock and update CHANGELOG.md.
+2. Run `./scripts/package-release.sh`. It builds an optimized bundle, embeds
+   Sparkle, creates the ZIP/checksum, signs it and updates `appcast.xml`.
+3. Review the changes and commit/tag the exact source used for the archive.
+4. Upload the archive/checksum to a draft release with that version's tag.
+5. Publish the release assets before pushing the updated appcast to `main`.
+   Older appcast entries are preserved by copying `appcast.xml` into the
+   packaging directory before generating the next feed.
+6. Exercise update detection, installation and relaunch from the previous
+   installed release. Build/signature checks alone do not verify this path.
+
+The signing tool requires the original Keychain key. Sparkle downloads are
+pinned by version and SHA256 in `scripts/fetch-sparkle.sh`. Framework licensing
+and integration details: https://sparkle-project.org/ (MIT).

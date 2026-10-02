@@ -1,4 +1,13 @@
+mod file_icons;
 mod layout;
+mod palette;
+mod shortcuts;
+mod sidebar;
+mod tree;
+mod vim;
+pub use file_icons::AppAssets;
+pub use palette::window_options;
+use tree::TreeState;
 mod terminal;
 mod terminal_commands;
 use terminal::TerminalView;
@@ -18,7 +27,7 @@ use crate::{
 };
 use gpui_kit::{
     component::{
-        Disableable, Icon, IconName, Selectable,
+        Disableable, Icon, IconName, Selectable, Sizable,
         button::{Button, ButtonVariants},
         input::{Input, InputEvent, InputState},
         resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
@@ -28,11 +37,11 @@ use gpui_kit::{
 };
 use operations::OperationDialog;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet, VecDeque},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-actions!(excavator_settings, [Settings]);
+actions!(excavator_settings, [Settings, CheckUpdates]);
 actions!(
     excavator_workspace,
     [
@@ -56,11 +65,22 @@ actions!(
         MoveTabRight,
         SelectNext,
         SelectPrevious,
+        ExpandRow,
+        CollapseRow,
+        PaletteNext,
+        PalettePrevious,
+        SidebarUp,
+        SidebarDown,
+        SidebarExpand,
+        SidebarCollapse,
+        SidebarOpen,
+        FocusSidebar,
         OpenSelection,
         SelectAll,
         EditPath,
         ToggleHidden,
         TogglePalette,
+        ToggleShortcuts,
         Escape,
         AddFavorite,
         CreateFolder,
@@ -91,7 +111,7 @@ actions!(
     ]
 );
 #[derive(Clone, Copy)]
-enum Sort {
+pub(super) enum Sort {
     Name,
     Kind,
     Size,
@@ -106,11 +126,16 @@ struct Tab {
     path: Location,
     history: Vec<Location>,
     cursor: usize,
+    /// Visible rows: the root listing plus loaded children of expanded folders.
     entries: Vec<Entry>,
+    depths: Vec<usize>,
+    root_entries: Vec<Entry>,
+    tree: TreeState,
     selected: BTreeSet<usize>,
     anchor: Option<usize>,
     selection_cursor: Option<usize>,
     loading: bool,
+    cached_listing: bool,
     error: Option<String>,
     generation: u64,
     cancel: CancellationToken,
@@ -123,6 +148,13 @@ struct PaneDrag {
     source_tab_id: u64,
     sources: Vec<Location>,
     external_paths: Option<Vec<(PathBuf, bool)>>,
+}
+
+#[derive(Clone)]
+struct TabDrag {
+    source_pane: usize,
+    tab_id: u64,
+    label: String,
 }
 
 struct PaneDragPreview {
@@ -153,10 +185,14 @@ impl Tab {
             history: vec![path],
             cursor: 0,
             entries: vec![],
+            depths: vec![],
+            root_entries: vec![],
+            tree: TreeState::default(),
             selected: BTreeSet::new(),
             anchor: None,
             selection_cursor: None,
             loading: false,
+            cached_listing: false,
             error: None,
             generation: 0,
             cancel: CancellationToken::new(),
@@ -165,25 +201,14 @@ impl Tab {
         }
     }
     fn sort_entries(&mut self) {
-        let sort = self.sort;
-        let desc = self.descending;
-        self.entries.sort_by(|a, b| {
-            (a.kind != EntryKind::Directory)
-                .cmp(&(b.kind != EntryKind::Directory))
-                .then_with(|| {
-                    let order = match sort {
-                        Sort::Name => a.name.cmp(&b.name),
-                        Sort::Kind => format!("{:?}", a.kind).cmp(&format!("{:?}", b.kind)),
-                        Sort::Size => a.size.cmp(&b.size),
-                        Sort::Modified => a.modified.cmp(&b.modified),
-                    };
-                    if desc { order.reverse() } else { order }
-                })
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        self.selected.clear();
-        self.anchor = None;
-        self.selection_cursor = None;
+        let (sort, descending) = (self.sort, self.descending);
+        tree::sort_list(&mut self.root_entries, sort, descending);
+        for children in self.tree.children.values_mut() {
+            if let tree::Children::Loaded(entries) = children {
+                tree::sort_list(entries, sort, descending);
+            }
+        }
+        self.rebuild_rows();
     }
 }
 struct Pane {
@@ -218,6 +243,9 @@ impl Pane {
 }
 #[derive(Clone, Copy)]
 enum Command {
+    CheckUpdates,
+    Shortcuts,
+    ToggleVim,
     Switch,
     PreviousPane,
     Split(Axis),
@@ -234,6 +262,7 @@ enum Command {
     PreviousTab,
     MoveTabLeft,
     MoveTabRight,
+    MoveTabNextPane,
     Hidden,
     Favorite,
     RemoveFavorite,
@@ -264,13 +293,23 @@ enum Command {
     ConnectionProtocol(Protocol),
     SavedConnection(usize, u8),
     Settings,
+    SidebarUp,
+    SidebarDown,
+    SidebarExpand,
+    SidebarCollapse,
+    SidebarOpen,
+    FocusSidebar,
     AppearanceMode(AppearanceMode),
     LightTheme(LightTheme),
     DarkTheme(DarkTheme),
     Density(RowDensity),
     ResetAppearance,
 }
+const INDENT: f32 = 16.;
 const COMMANDS: &[(&str, &str, Command)] = &[
+    ("Check for updates", "", Command::CheckUpdates),
+    ("Keyboard shortcuts", "⌘?", Command::Shortcuts),
+    ("Toggle Vim mode", "", Command::ToggleVim),
     ("Settings: Appearance", "⌘,", Command::Settings),
     ("Choose folder for active pane", "⌘O", Command::ChooseFolder),
     (
@@ -446,6 +485,12 @@ const COMMANDS: &[(&str, &str, Command)] = &[
     ("Split pane down", "⌘⌥↓", Command::Split(Axis::Down)),
     ("Close pane split", "⌘⌥W", Command::ClosePane),
     ("Toggle sidebar", "⌘B", Command::Sidebar),
+    ("Focus sidebar", "⌘⌥S", Command::FocusSidebar),
+    ("Select next sidebar item", "↓", Command::SidebarDown),
+    ("Select previous sidebar item", "↑", Command::SidebarUp),
+    ("Expand sidebar folder", "→", Command::SidebarExpand),
+    ("Collapse sidebar folder", "←", Command::SidebarCollapse),
+    ("Open sidebar item", "Enter", Command::SidebarOpen),
     ("Back", "⌘[", Command::Back),
     ("Forward", "⌘]", Command::Forward),
     ("Parent folder", "⌘↑", Command::Parent),
@@ -456,10 +501,16 @@ const COMMANDS: &[(&str, &str, Command)] = &[
     ("Previous tab", "Ctrl Shift Tab", Command::PreviousTab),
     ("Move tab left", "⌘Shift[", Command::MoveTabLeft),
     ("Move tab right", "⌘Shift]", Command::MoveTabRight),
+    ("Move tab to next pane", "", Command::MoveTabNextPane),
     ("Toggle hidden files", "⌘Shift.", Command::Hidden),
     ("Add current folder to favorites", "⌘D", Command::Favorite),
 ];
 pub struct Workspace {
+    vim: vim::VimState,
+    shortcuts_open: bool,
+    shortcuts_focus: FocusHandle,
+    shortcuts_previous_focus: Option<FocusHandle>,
+    shortcuts_scroll: ScrollHandle,
     panes: PaneStore,
     layout: Layout,
     next_split_id: usize,
@@ -470,17 +521,31 @@ pub struct Workspace {
     settings_inputs: Vec<Entity<InputState>>,
     settings_scroll: ScrollHandle,
     connections: Vec<ConnectionRecord>,
+    connection_groups: Vec<String>,
+    connection_focus: FocusHandle,
     connection_screen: Option<ConnectionScreen>,
     connection_inputs: Vec<Entity<InputState>>,
     connection_busy: bool,
     connection_cancel: CancellationToken,
     connection_generation: u64,
     connection_scroll: ScrollHandle,
+    sftp_listing_cache: VecDeque<(Location, bool, Vec<Entry>)>,
+    listing_cache_epoch: u64,
     active: usize,
     preferences: Preferences,
     notice: Option<String>,
     palette: bool,
     palette_input: Entity<InputState>,
+    palette_index: usize,
+    palette_scroll: ScrollHandle,
+    sidebar_tree: TreeState,
+    sidebar_collapsed: HashSet<String>,
+    sidebar_scroll: ScrollHandle,
+    sidebar_search: Entity<InputState>,
+    sidebar_cursor: usize,
+    sidebar_focus: FocusHandle,
+    sidebar_split: Entity<ResizableState>,
+    _sidebar_subscription: std::rc::Rc<Subscription>,
     _subscriptions: Vec<Subscription>,
     next_id: u64,
     saving: bool,
@@ -518,8 +583,16 @@ impl Workspace {
         fixture: Option<PathBuf>,
     ) -> Self {
         cx.bind_keys([
-            KeyBinding::new("tab", SwitchPane, Some("Workspace && !Terminal")),
-            KeyBinding::new("shift-tab", PreviousPane, Some("Workspace && !Terminal")),
+            KeyBinding::new(
+                "cmd-shift-/",
+                ToggleShortcuts,
+                Some("Workspace || Shortcuts"),
+            ),
+            KeyBinding::new("cmd-?", ToggleShortcuts, Some("Workspace || Shortcuts")),
+            KeyBinding::new("?", ToggleShortcuts, Some("Listing && !Vim")),
+            KeyBinding::new("shift-/", ToggleShortcuts, Some("Listing && !Vim")),
+            KeyBinding::new("tab", SwitchPane, Some("Workspace && !Terminal && !Vim")),
+            KeyBinding::new("shift-tab", PreviousPane, Some("Workspace && !Terminal && !VimInput")),
             KeyBinding::new("cmd-alt-right", SplitRight, Some("Workspace")),
             KeyBinding::new("cmd-alt-shift-right", SplitTerminalRight, Some("Workspace")),
             KeyBinding::new("cmd-alt-shift-down", SplitTerminalDown, Some("Workspace")),
@@ -528,6 +601,13 @@ impl Workspace {
             KeyBinding::new("cmd-alt-]", SwitchPane, Some("Workspace")),
             KeyBinding::new("cmd-alt-[", PreviousPane, Some("Workspace")),
             KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
+            KeyBinding::new("cmd-alt-s", FocusSidebar, Some("Workspace")),
+            KeyBinding::new("up", SidebarUp, Some("Sidebar")),
+            KeyBinding::new("down", SidebarDown, Some("Sidebar")),
+            KeyBinding::new("right", SidebarExpand, Some("Sidebar")),
+            KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
+            KeyBinding::new("enter", SidebarOpen, Some("Sidebar")),
+            KeyBinding::new("return", SidebarOpen, Some("Sidebar")),
             KeyBinding::new("cmd-[", Back, Some("Workspace")),
             KeyBinding::new("cmd-]", Forward, Some("Workspace")),
             KeyBinding::new("cmd-up", Parent, Some("Workspace")),
@@ -542,19 +622,21 @@ impl Workspace {
             ),
             KeyBinding::new("cmd-shift-[", MoveTabLeft, Some("Workspace")),
             KeyBinding::new("cmd-shift-]", MoveTabRight, Some("Workspace")),
-            KeyBinding::new("down", SelectNext, Some("Listing")),
-            KeyBinding::new("up", SelectPrevious, Some("Listing")),
-            KeyBinding::new("enter", OpenSelection, Some("Listing")),
-            KeyBinding::new("cmd-a", SelectAll, Some("Listing")),
+            KeyBinding::new("down", SelectNext, Some("Listing && !VimInput")),
+            KeyBinding::new("up", SelectPrevious, Some("Listing && !VimInput")),
+            KeyBinding::new("right", ExpandRow, Some("Listing && !VimInput")),
+            KeyBinding::new("left", CollapseRow, Some("Listing && !VimInput")),
+            KeyBinding::new("enter", OpenSelection, Some("Listing && !Vim")),
+            KeyBinding::new("cmd-a", SelectAll, Some("Listing && !VimInput")),
             KeyBinding::new("cmd-l", EditPath, Some("Workspace")),
             KeyBinding::new("cmd-o", ChooseFolder, Some("Workspace")),
             KeyBinding::new("cmd-shift-.", ToggleHidden, Some("Workspace")),
             KeyBinding::new("cmd-shift-p", TogglePalette, Some("Workspace")),
-            KeyBinding::new("escape", Escape, Some("Workspace && !Terminal")),
+            KeyBinding::new("escape", Escape, Some("Workspace && !Terminal && !Vim && !TransferConflict")),
             KeyBinding::new("cmd-d", AddFavorite, Some("Workspace")),
             KeyBinding::new("cmd-shift-d", RemoveFavorite, Some("Workspace")),
-            KeyBinding::new("shift-down", ExtendSelectionNext, Some("Listing")),
-            KeyBinding::new("shift-up", ExtendSelectionPrevious, Some("Listing")),
+            KeyBinding::new("shift-down", ExtendSelectionNext, Some("Listing && !VimInput")),
+            KeyBinding::new("shift-up", ExtendSelectionPrevious, Some("Listing && !VimInput")),
             KeyBinding::new(
                 "ctrl-alt-right",
                 GrowLeftPane,
@@ -598,8 +680,10 @@ impl Workspace {
                 Some("ConnectionEditor && Input"),
             ),
         ]);
-        let connection_inputs = (0..13)
-            .map(|i| cx.new(|cx| InputState::new(window, cx).masked(i >= 9)))
+        let connection_inputs = (0..16)
+            .map(|i| {
+                cx.new(|cx| InputState::new(window, cx).masked(matches!(i, 9 | 10 | 11 | 12 | 15)))
+            })
             .collect::<Vec<_>>();
         let operation_input = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
         cx.bind_keys([
@@ -652,8 +736,12 @@ impl Workspace {
         panes[0].focus.focus(window, cx);
         let palette_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search commands…"));
+        let sidebar_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search sidebar…"));
         let split_state = cx.new(|_| ResizableState::default());
         let split_subscription = Self::observe_split(&split_state, cx);
+        let sidebar_split = cx.new(|_| ResizableState::default());
+        let sidebar_subscription = Self::observe_split(&sidebar_split, cx);
         let mut subscriptions = vec![];
         for (index, input) in settings_inputs.iter().enumerate() {
             subscriptions.push(cx.subscribe_in(
@@ -667,29 +755,28 @@ impl Workspace {
         subscriptions.push(cx.subscribe_in(
             &palette_input,
             window,
-            |this, _, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    if let Some((_, _, command)) = this.filtered_commands(cx).first() {
-                        this.command(*command, window, cx);
-                        this.palette = false;
-                        if this.operation_dialog.is_none()
-                            && this.connection_screen.is_none()
-                            && !this.settings_open
-                            && !matches!(
-                                command,
-                                Command::EditPath
-                                    | Command::Terminal
-                                    | Command::FocusTerminal
-                                    | Command::NewTerminal
-                            )
-                        {
-                            this.activate(this.active, window, cx);
-                        }
-                    }
+            |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.run_selected_palette_command(window, cx),
+                InputEvent::Change => {
+                    this.palette_index = 0;
+                    this.palette_scroll.scroll_to_item(0);
+                    cx.notify();
                 }
-                cx.notify();
+                _ => {}
             },
         ));
+        subscriptions.push(
+            cx.subscribe_in(&sidebar_search, window, |this, _, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.sidebar_cursor = this
+                        .visible_sidebar_nodes(cx)
+                        .first()
+                        .map(|(index, _)| *index)
+                        .unwrap_or(0);
+                    cx.notify();
+                }
+            }),
+        );
         subscriptions.push(cx.subscribe_in(
             &operation_input,
             window,
@@ -727,21 +814,31 @@ impl Workspace {
             } else {
                 this.load_preferences(window, cx);
                 this.load_connections(cx);
+                this.ensure_sidebar_disks_loaded(cx);
             }
         });
         let mut workspace = Self {
+            vim: vim::VimState::default(),
             panes,
             colors,
             settings_open: false,
             settings_inputs,
+            shortcuts_open: false,
+            shortcuts_focus: cx.focus_handle(),
+            shortcuts_previous_focus: None,
+            shortcuts_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
             connections: vec![],
+            connection_groups: vec![],
+            connection_focus: cx.focus_handle(),
             connection_screen: None,
             connection_inputs,
             connection_busy: false,
             connection_cancel: CancellationToken::new(),
             connection_generation: 0,
             connection_scroll: ScrollHandle::new(),
+            sftp_listing_cache: VecDeque::new(),
+            listing_cache_epoch: 0,
             layout: Layout::Split {
                 id: 0,
                 axis: Axis::Right,
@@ -756,6 +853,16 @@ impl Workspace {
             notice: None,
             palette: false,
             palette_input,
+            palette_index: 0,
+            palette_scroll: ScrollHandle::new(),
+            sidebar_tree: TreeState::default(),
+            sidebar_collapsed: HashSet::new(),
+            sidebar_scroll: ScrollHandle::new(),
+            sidebar_search,
+            sidebar_cursor: 0,
+            sidebar_focus: cx.focus_handle(),
+            sidebar_split,
+            _sidebar_subscription: sidebar_subscription,
             _subscriptions: subscriptions,
             next_id: 2,
             saving: false,
@@ -773,7 +880,7 @@ impl Workspace {
         for id in 0..2 {
             workspace.subscribe_pane(id, window, cx);
         }
-        workspace.start_transfer_poll(cx);
+        workspace.start_transfer_poll(window, cx);
         workspace
     }
     fn load_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -810,6 +917,7 @@ impl Workspace {
         if !self.panes.contains(i) {
             return;
         }
+        self.reset_vim();
         if self.active != i && self.panes.contains(self.active) {
             self.recent_pane = Some(self.active);
         }
@@ -840,6 +948,11 @@ impl Workspace {
         }
         let registry = self.registry.clone();
         let show_hidden = self.preferences.show_hidden;
+        let path = self.panes[i].tab().path.clone();
+        let cached = self.sftp_listing_cache.iter()
+            .find(|(location, hidden, _)| location == &path && *hidden == show_hidden)
+            .map(|(_, _, entries)| entries.clone());
+        let cache_epoch = self.listing_cache_epoch;
         let tab = self.panes[i].tab_mut();
         tab.cancel.cancel();
         tab.cancel = CancellationToken::new();
@@ -847,9 +960,17 @@ impl Workspace {
         tab.loading = true;
         tab.error = None;
         tab.entries.clear();
+        tab.depths.clear();
+        tab.root_entries.clear();
+        tab.tree.reset_children();
         tab.selected.clear();
         tab.anchor = None;
         tab.selection_cursor = None;
+        tab.cached_listing = cached.is_some();
+        if let Some(entries) = cached {
+            tab.root_entries = entries;
+            tab.sort_entries();
+        }
         let id = tab.id;
         let generation = tab.generation;
         let request = registry.list(
@@ -861,6 +982,7 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                let Some(i) = this.panes.ids().into_iter().find(|pane| this.panes[*pane].tabs.iter().any(|tab| tab.id == id)) else { return; };
                 let Some(pane) = this.panes.get_mut(i) else {
                     return;
                 };
@@ -872,12 +994,31 @@ impl Workspace {
                     return;
                 };
                 tab.loading = false;
+                let mut reexpand = vec![];
                 match result {
                     Ok(entries) => {
-                        tab.entries = entries;
-                        tab.sort_entries()
+                        let cache_entries = if matches!(path, Location::Sftp { .. }) && entries.len() <= 10_000 {
+                            Some(entries.clone())
+                        } else { None };
+                        tab.root_entries = entries;
+                        tab.sort_entries();
+                        tab.cached_listing = false;
+                        // Refresh keeps folders expanded; reload each of them.
+                        reexpand = std::mem::take(&mut tab.tree.expanded).into_iter().collect();
+                        if cache_epoch == this.listing_cache_epoch {
+                            if let Some(entries) = cache_entries {
+                                this.sftp_listing_cache.retain(|(location, hidden, _)| location != &path || *hidden != show_hidden);
+                                this.sftp_listing_cache.push_back((path.clone(), show_hidden, entries));
+                                while this.sftp_listing_cache.len() > 64 || this.sftp_listing_cache.iter().map(|(_, _, entries)| entries.len()).sum::<usize>() > 50_000 {
+                                    this.sftp_listing_cache.pop_front();
+                                }
+                            }
+                        }
                     }
                     Err(error) => tab.error = Some(error.to_string()),
+                }
+                for location in reexpand {
+                    this.expand_location(i, id, location, cx);
                 }
                 cx.notify();
             });
@@ -904,6 +1045,10 @@ impl Workspace {
             tab.history.truncate(tab.cursor + 1);
             tab.history.push(path.clone());
             tab.cursor += 1;
+        }
+        if tab.path != path {
+            tab.tree.clear();
+            self.vim = vim::VimState::default();
         }
         tab.path = path;
         self.sync_path(i, window, cx);
@@ -995,7 +1140,22 @@ impl Workspace {
             .collect()
     }
     fn command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.preferences_loaded {
+        if self.operation_dialog.is_some() { return; }
+        if self.connection_screen.is_some()
+            && !matches!(command,
+                Command::SaveConnection | Command::TestDraftConnection | Command::ConfirmConnection
+                | Command::ConnectionProtocol(_) | Command::SavedConnection(_, _)
+                | Command::Connections | Command::NewConnection | Command::ImportForkLift
+                | Command::TestConnection | Command::EditConnection | Command::RemoveConnection
+                | Command::ResetHost)
+        {
+            return;
+        }
+        if matches!(command, Command::Shortcuts) {
+            self.toggle_shortcuts(window, cx);
+            return;
+        }
+        if self.shortcuts_open || !self.preferences_loaded {
             return;
         }
         let i = self.active;
@@ -1020,7 +1180,30 @@ impl Workspace {
             return;
         }
         match command {
+            Command::ToggleVim => {
+                self.preferences.vim_mode = !self.preferences.vim_mode;
+                self.vim = vim::VimState::default();
+                self.persist(cx);
+            }
+            Command::Shortcuts => unreachable!(),
+            Command::CheckUpdates => {
+                if let Err(error) = crate::updater::check_for_updates() { self.notice = Some(error); cx.notify(); }
+            },
             Command::Settings => self.open_settings(window, cx),
+            Command::SidebarUp => self.move_sidebar_cursor(-1, cx),
+            Command::SidebarDown => self.move_sidebar_cursor(1, cx),
+            Command::SidebarExpand => self.expand_sidebar_cursor(cx),
+            Command::SidebarCollapse => self.collapse_sidebar_cursor(cx),
+            Command::SidebarOpen => self.open_sidebar_cursor(window, cx),
+            Command::FocusSidebar => {
+                if !self.preferences.sidebar_visible {
+                    self.preferences.sidebar_visible = true;
+                    self.sidebar_cursor = 0;
+                    self.persist(cx);
+                }
+                self.sidebar_focus.focus(window, cx);
+                cx.notify();
+            }
             Command::AppearanceMode(mode) => {
                 self.preferences.appearance.mode = mode;
                 self.preview_appearance(window, cx);
@@ -1052,6 +1235,7 @@ impl Workspace {
             Command::Connections => {
                 self.connection_screen = Some(ConnectionScreen::List);
                 self.palette = false;
+                self.connection_focus.focus(window, cx);
             }
             Command::NewConnection => self.edit_connection(None, window, cx),
             Command::ImportForkLift => self.begin_import(window, cx),
@@ -1101,6 +1285,10 @@ impl Workspace {
             Command::ClosePane => self.close_pane(window, cx),
             Command::Sidebar => {
                 self.preferences.sidebar_visible = !self.preferences.sidebar_visible;
+                if self.preferences.sidebar_visible {
+                    self.sidebar_scroll.set_offset(point(px(0.), px(0.)));
+                    self.sidebar_cursor = 0;
+                }
                 self.persist(cx)
             }
             Command::Back => self.history(-1, window, cx),
@@ -1121,7 +1309,10 @@ impl Workspace {
                 self.request_listing(i, cx)
             }
             Command::CloseTab => {
-                if self.panes[i].tabs.len() > 1 {
+                if self.panes[i].tabs.len() == 1 {
+                    // The last tab closes its split; each original side keeps one pane.
+                    self.close_pane(window, cx);
+                } else {
                     let active = self.panes[i].active;
                     self.panes[i].tabs[active].cancel.cancel();
                     self.panes[i].tabs.remove(active);
@@ -1143,6 +1334,14 @@ impl Workspace {
                 self.sync_path(i, window, cx);
                 self.activate(i, window, cx);
                 self.persist(cx)
+            }
+            Command::MoveTabNextPane => {
+                let leaves = self.layout.leaves();
+                let position = leaves.iter().position(|pane| *pane == i).unwrap_or(0);
+                let destination = leaves[(position + 1) % leaves.len()];
+                let tab = self.panes[i].tab();
+                let drag = TabDrag { source_pane: i, tab_id: tab.id, label: tab.path.label() };
+                self.move_dragged_tab(&drag, destination, None, window, cx);
             }
             Command::MoveTabLeft | Command::MoveTabRight => {
                 let old = self.panes[i].active;
@@ -1303,11 +1502,33 @@ impl Workspace {
         if let Some(entry) = tab.selection_cursor.and_then(|row| tab.entries.get(row)) {
             if entry.kind == EntryKind::Directory {
                 self.navigate(self.active, entry.location.clone(), true, window, cx)
+            } else if entry.kind == EntryKind::Symlink {
+                self.open_linked_folder(self.active, entry.location.clone(), window, cx);
             } else {
                 let location = entry.location.clone();
                 self.open_file(location, cx);
             }
         }
+    }
+    fn open_linked_folder(&mut self, pane: usize, location: Location, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.panes[pane].tab();
+        let id = tab.id;
+        let generation = tab.generation;
+        let cancel = tab.cancel.clone();
+        let registry = self.registry.clone();
+        let task = cx.background_executor().spawn(async move {
+            registry.linked_directory(&location, &cancel)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if !this.panes.contains(pane) || this.panes[pane].tab().id != id || this.panes[pane].tab().generation != generation { return; }
+                match result {
+                    Ok(target) => this.navigate(pane, target, true, window, cx),
+                    Err(error) => { this.notice = Some(error.to_string()); cx.notify(); }
+                }
+            });
+        }).detach();
     }
     fn open_file(&mut self, location: Location, cx: &mut Context<Self>) {
         if !location.is_local() {
@@ -1330,6 +1551,314 @@ impl Workspace {
         })
         .detach();
     }
+    /// One pane's tab strip, rendered in the window's top tab row.
+    fn move_dragged_tab(&mut self, drag: &TabDrag, destination: usize, before: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        let source = drag.source_pane;
+        if self.connection_screen.is_some() || !self.panes.contains(source) || !self.panes.contains(destination) { return; }
+        let Some(index) = self.panes[source].tabs.iter().position(|tab| tab.id == drag.tab_id) else { return; };
+        if before == Some(drag.tab_id) { return; }
+        let path = self.panes[source].tabs[index].path.clone();
+        let active_id = self.panes[source].tab().id;
+        let tab = self.panes[source].tabs.remove(index);
+        if source != destination {
+            self.panes[source].recent_file_tab = self.panes[source].recent_file_tab.filter(|id| *id != drag.tab_id);
+            self.panes[source].recent_terminal_tab = self.panes[source].recent_terminal_tab.filter(|id| *id != drag.tab_id);
+        }
+        let insertion = before.and_then(|id| self.panes[destination].tabs.iter().position(|tab| tab.id == id))
+            .unwrap_or(self.panes[destination].tabs.len());
+        self.panes[destination].tabs.insert(insertion, tab);
+        self.panes[destination].active = insertion;
+        if source != destination {
+            if self.panes[source].tabs.is_empty() {
+                if self.can_close_pane(source) {
+                    self.active = source;
+                    self.close_pane(window, cx);
+                } else {
+                    self.panes[source].tabs.push(Tab::new(self.next_id, path));
+                    self.next_id += 1;
+                    self.panes[source].active = 0;
+                    self.request_listing(source, cx);
+                }
+            } else {
+                self.panes[source].active = self.panes[source].tabs.iter().position(|tab| tab.id == active_id)
+                    .unwrap_or(index.min(self.panes[source].tabs.len() - 1));
+            }
+            if self.panes.contains(source) { self.sync_path(source, window, cx); }
+        }
+        self.sync_path(destination, window, cx);
+        self.activate(destination, window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+    fn render_pane_tabs(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.colors;
+        let font_size = self.preferences.appearance.font_size;
+        let scale = font_size / 13.;
+        let pane = &self.panes[i];
+        let active = self.active == i;
+        let can_close_pane = self.can_close_pane(i);
+        let pane_tab_id = pane.tab().id;
+        div()
+            .id(("pane-tabs", i))
+            .key_context("TabStrip")
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .h(px(font_size + 19.))
+            .line_height(relative(1.))
+            .flex()
+            .items_center()
+            .bg(rgb(if active {
+                theme.background
+            } else {
+                theme.surface
+            }))
+            .border_b_1()
+            .border_color(rgb(if active { theme.accent } else { theme.border }))
+            .can_drop(|payload, _, _| payload.is::<TabDrag>())
+            .drag_over::<TabDrag>(move |style, _, _, _| style.bg(rgb(theme.hover)))
+            .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                this.move_dragged_tab(drag, i, None, window, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    if this.panes.contains(i) {
+                        this.activate(i, window, cx);
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .id(("pane-tabs-scroll", i))
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .overflow_x_scroll()
+                    .children(pane.tabs.iter().enumerate().map(|(t, tab)| {
+                        let is_active = t == pane.active;
+                        let path_label = tab.path.label();
+                        let tab_icon = if tab.terminal.is_some() {
+                            Icon::new(IconName::SquareTerminal)
+                        } else if matches!(tab.path, Location::S3 { .. }) {
+                            Icon::new(gpui_kit::assets::IconName::Cloud)
+                        } else if !tab.path.is_local() {
+                            Icon::new(gpui_kit::assets::IconName::Server)
+                        } else {
+                            Icon::new(gpui_kit::assets::IconName::FolderTree)
+                        };
+                        let tab_id = tab.id;
+                        let tab_group = format!("pane-{i}-tab-{t}");
+                        div()
+                            .group(tab_group.clone())
+                            .flex_none()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .bg(rgb(if is_active {
+                                theme.background
+                            } else {
+                                theme.surface
+                            }))
+                            .child(
+                                div()
+                                    .id(format!("tab-{i}-{t}"))
+                                    .max_w(px(160. * scale))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .px(px(10.))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .cursor_pointer()
+                                    .on_drag(TabDrag { source_pane: i, tab_id, label: path_label.clone() }, |drag, _, _, cx| {
+                                        cx.new(|_| PaneDragPreview { label: drag.label.clone() })
+                                    })
+                                    .can_drop(|payload, _, _| payload.is::<TabDrag>())
+                                    .drag_over::<TabDrag>(move |style, _, _, _| style.border_l_2().border_color(rgb(theme.accent)))
+                                    .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                                        cx.stop_propagation();
+                                        this.move_dragged_tab(drag, i, Some(tab_id), window, cx);
+                                    }))
+                                    .hover(|style| style.bg(rgb(theme.hover)))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if !this.panes.contains(i)
+                                            || this.panes[i]
+                                                .tabs
+                                                .get(t)
+                                                .is_none_or(|tab| tab.id != tab_id)
+                                        {
+                                            return;
+                                        }
+                                        this.panes[i].active = t;
+                                        this.activate(i, window, cx);
+                                        this.sync_path(i, window, cx);
+                                        this.persist(cx);
+                                    }))
+                                    .child(
+                                        tab_icon
+                                            .size(px(font_size + 1.))
+                                            .flex_none()
+                                            .text_color(rgb(theme.muted)),
+                                    )
+                                    .child(
+                                        div().min_w_0().text_ellipsis().child(path_label.clone()),
+                                    ),
+                            )
+                            .child(
+                                Button::new(format!("close-tab-{i}-{t}"))
+                                    .ghost()
+                                    .compact()
+                                    .w(px(22.))
+                                    .opacity(0.)
+                                    .group_hover(tab_group, |style| style.opacity(1.))
+                                    .focus_visible(|style| style.opacity(1.))
+                                    .icon(Icon::new(IconName::Close))
+                                    .accessibility_label(format!("Close tab {path_label}"))
+                                    .tooltip(if pane.tabs.len() <= 1 {
+                                        "Close tab and its split · ⌘W"
+                                    } else if is_active {
+                                        "Close tab · ⌘W"
+                                    } else {
+                                        "Select and close tab · ⌘W"
+                                    })
+                                    .disabled(pane.tabs.len() <= 1 && !can_close_pane)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if this.panes.contains(i)
+                                            && this.panes[i]
+                                                .tabs
+                                                .get(t)
+                                                .is_some_and(|tab| tab.id == tab_id)
+                                        {
+                                            if !this.panes.contains(i)
+                                                || this.panes[i]
+                                                    .tabs
+                                                    .get(t)
+                                                    .is_none_or(|tab| tab.id != tab_id)
+                                            {
+                                                return;
+                                            }
+                                            this.panes[i].active = t;
+                                            this.activate(i, window, cx);
+                                            this.command(Command::CloseTab, window, cx);
+                                        }
+                                    })),
+                            )
+                    })),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(
+                        Button::new(("new-tab", i))
+                            .ghost()
+                            .compact()
+                            .icon(Icon::new(IconName::Plus))
+                            .accessibility_label("New tab; Option-click to split down; Shift-Option-click to split right")
+                            .tooltip("New tab · ⌘T  ·  ⌥-click: split down  ·  ⇧⌥-click: split right")
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                if !this.panes.contains(i) || this.panes[i].tab().id != pane_tab_id
+                                {
+                                    return;
+                                }
+                                this.activate(i, window, cx);
+                                this.command(
+                                    if event.modifiers().alt && event.modifiers().shift {
+                                        Command::Split(Axis::Right)
+                                    } else if event.modifiers().alt {
+                                        Command::Split(Axis::Down)
+                                    } else {
+                                        Command::NewTab
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(("new-terminal-tab", i))
+                            .ghost()
+                            .compact()
+                            .icon(Icon::new(IconName::SquareTerminal))
+                            .accessibility_label("New terminal tab; Option-click to split terminal down; Shift-Option-click to split terminal right")
+                            .tooltip("New terminal tab · ⌘⌥T  ·  ⌥-click: split down  ·  ⇧⌥-click: split right")
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                if !this.panes.contains(i) || this.panes[i].tab().id != pane_tab_id
+                                {
+                                    return;
+                                }
+                                this.activate(i, window, cx);
+                                this.command(
+                                    if event.modifiers().alt && event.modifiers().shift {
+                                        Command::SplitTerminal(Axis::Right)
+                                    } else if event.modifiers().alt {
+                                        Command::SplitTerminal(Axis::Down)
+                                    } else {
+                                        Command::NewTerminal
+                                    },
+                                    window, cx,
+                                );
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+    fn render_path_bar(&self, i: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let pane = &self.panes[i];
+        let font_size = self.preferences.appearance.font_size;
+        let loading_indicator = || div().flex_none().w(px(20.)).h_full().flex().items_center().justify_center()
+            .when(pane.tab().loading, |slot| slot.child(
+                gpui_kit::component::spinner::Spinner::new().with_size(px(14.)).color(rgb(self.colors.muted).into())
+            ));
+        if pane.path_input.read(cx).focus_handle(cx).is_focused(window) {
+            return div().flex().items_center().h_full()
+                .child(div().flex_1().min_w_0().child(Styled::h(Input::new(&pane.path_input), px(font_size + 16.))
+                    .px(px(10.)).py(px(4.)).text_size(px(font_size))))
+                .child(loading_indicator()).into_any_element();
+        }
+        let mut crumbs = vec![pane.tab().path.clone()];
+        while let Some(parent) = crumbs.last().and_then(Location::parent) {
+            if crumbs.contains(&parent) { break; }
+            crumbs.push(parent);
+        }
+        crumbs.reverse();
+        let tab_id = pane.tab().id;
+        div().flex().items_center().h_full().gap(px(4.))
+            .child(div().id(("path-breadcrumbs", i)).flex_1().min_w_0().h_full().flex().items_center().overflow_x_scroll()
+                .children(crumbs.into_iter().enumerate().map(|(index, location)| {
+                    let mut label = location.label();
+                    if index == 0 {
+                        if let Location::Sftp { connection, .. } | Location::Ftps { connection, .. } = &location {
+                            label = self.connections.iter().find(|record| &record.id == connection)
+                                .map(|record| record.name.clone()).unwrap_or_else(|| "Remote".into());
+                        }
+                    }
+                    div().flex_none().flex().items_center().gap(px(4.))
+                        .when(index > 0, |row| row.child(Icon::new(IconName::ChevronRight).size(px(12.)).text_color(rgb(self.colors.muted))))
+                        .child(Button::new(("breadcrumb", i * 1000 + index)).ghost().compact().label(label.clone())
+                            .accessibility_label(format!("Open folder {label}"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if !this.panes.contains(i) || this.panes[i].tab().id != tab_id { return; }
+                                this.activate(i, window, cx);
+                                this.navigate(i, location.clone(), true, window, cx);
+                            })))
+                })))
+            .child(loading_indicator())
+            .child(Button::new(("edit-pane-path", i)).ghost().compact().label("…")
+                .accessibility_label("Edit path").tooltip("Edit path · ⌘L")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if !this.panes.contains(i) { return; }
+                    this.activate(i, window, cx);
+                    this.command(Command::EditPath, window, cx);
+                })))
+            .into_any_element()
+    }
     fn render_pane(&self, i: usize, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.colors;
         let font_size = self.preferences.appearance.font_size;
@@ -1340,11 +1869,17 @@ impl Workspace {
             .row_height(font_size);
         let pane = &self.panes[i];
         let fallback = (window.viewport_size().width
-            - px(if self.preferences.sidebar_visible {
-                160.
+            - if self.preferences.sidebar_visible {
+                self.sidebar_split
+                    .read(cx)
+                    .sizes()
+                    .first()
+                    .copied()
+                    .filter(|width| *width > px(0.))
+                    .unwrap_or(px(sidebar::SIDEBAR_WIDTH))
             } else {
-                0.
-            })
+                px(0.)
+            }
             - px(1.))
             / 2.;
         let width = self.layout.width(i, fallback * 2., cx);
@@ -1355,11 +1890,15 @@ impl Workspace {
         let tab = pane.tab();
         let pane_tab_id = tab.id;
         let file_tab = tab.terminal.is_none();
-        let active = self.active == i;
         let mut content = div()
             .id(("listing", i))
             .track_focus(&pane.focus)
-            .key_context("Listing")
+            .key_context(if self.preferences.vim_mode {
+                if self.vim_input_active() { "Listing Vim VimInput" } else { "Listing Vim" }
+            } else { "Listing" })
+            .on_key_down(cx.listener(|this, event, window, cx| {
+                if this.vim_key(event, window, cx) { cx.stop_propagation(); }
+            }))
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -1368,14 +1907,13 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| this.activate(i, window, cx)),
             );
-        if tab.loading {
-            content = content.child(
-                div()
-                    .p_4()
-                    .text_color(rgb(theme.muted))
-                    .child("Loading directory…"),
-            )
-        } else if let Some(error) = &tab.error {
+        if tab.cached_listing && let Some(error) = &tab.error {
+            content = content.child(div().px_3().py_1().text_color(rgb(theme.warning))
+                .child(format!("Refresh failed: {error} · ⌘R Retry")));
+        }
+        if tab.loading && !tab.cached_listing {
+            // Keep initial loading empty; progress lives in the fixed path bar.
+        } else if let Some(error) = tab.error.as_ref().filter(|_| !tab.cached_listing) {
             content = content.child(
                 div()
                     .p_4()
@@ -1424,6 +1962,12 @@ impl Workspace {
                     external_paths,
                 };
                 let is_dir = entry.kind == EntryKind::Directory;
+                let is_link = entry.kind == EntryKind::Symlink;
+                let depth = tab.depth(row);
+                let expanded = is_dir && tab.tree.is_expanded(&entry.location);
+                let loading = expanded && tab.tree.is_loading(&entry.location);
+                let (icon, icon_color) = file_icons::entry_icon(entry, expanded, &theme);
+                let toggle_path = entry.location.clone();
                 div()
                     .id(format!("entry-{i}-{row}"))
                     .h(px(row_height))
@@ -1434,6 +1978,8 @@ impl Workspace {
                     .gap_2()
                     .bg(rgb(if selected {
                         theme.selection
+                    } else if self.preferences.vim_mode && i == self.active && tab.selection_cursor == Some(row) {
+                        theme.hover
                     } else {
                         theme.background
                     }))
@@ -1475,6 +2021,8 @@ impl Workspace {
                             if event.click_count == 2 {
                                 if is_dir {
                                     this.navigate(i, path.clone(), true, window, cx);
+                                } else if is_link {
+                                    this.open_linked_folder(i, path.clone(), window, cx);
                                 } else {
                                     this.open_file(path.clone(), cx);
                                 }
@@ -1494,11 +2042,62 @@ impl Workspace {
                         (!paths.is_empty())
                             .then(|| ExternalDragPayload::Files(FileDragPaths::new(paths.clone())))
                     })
+                    .when(depth > 0, |row| {
+                        row.child(div().flex_none().h_full().flex().children((0..depth).map(
+                            |_| {
+                                div().flex_none().w(px(INDENT)).h_full().child(
+                                    div()
+                                        .ml(px(6.))
+                                        .h_full()
+                                        .border_l_1()
+                                        .border_color(rgb(theme.border)),
+                                )
+                            },
+                        )))
+                    })
                     .child(
                         div()
+                            .id(format!("disclosure-{i}-{row}"))
+                            .flex_none()
                             .w(px(12.))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .text_color(rgb(if selected { theme.text } else { theme.muted }))
-                            .child(if is_dir { "▸" } else { "·" }),
+                            .when(is_dir, |chevron| {
+                                chevron
+                                    .cursor_pointer()
+                                    .opacity(if loading { 0.4 } else { 1. })
+                                    .child(
+                                        Icon::new(if expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size(px(12.)),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                            cx.stop_propagation();
+                                            if this.panes.contains(i)
+                                                && this.panes[i].tab().id == pane_tab_id
+                                                && this.panes[i].tab().entries.get(row).is_some_and(
+                                                    |entry| entry.location == toggle_path,
+                                                )
+                                            {
+                                                this.activate(i, window, cx);
+                                                this.toggle_row(i, row, cx);
+                                            }
+                                        }),
+                                    )
+                            }),
+                    )
+                    .child(
+                        Icon::new(icon)
+                            .size(px((font_size + 1.).max(12.)))
+                            .text_color(rgb(icon_color)),
                     )
                     .child(
                         div()
@@ -1549,8 +2148,11 @@ impl Workspace {
             .flex_col()
             .min_w_0()
             .bg(rgb(theme.background))
+            .when(!self.layout.top_leaves().contains(&i), |pane| {
+                pane.child(self.render_pane_tabs(i, cx))
+            })
             .can_drop(move |payload, _, _| {
-                file_tab
+                payload.is::<TabDrag>() || file_tab
                     && (payload
                         .downcast_ref::<PaneDrag>()
                         .is_some_and(|drag| drag.source_pane != i && !drag.sources.is_empty())
@@ -1564,127 +2166,18 @@ impl Workspace {
             .drag_over::<ExternalPaths>(move |style, _, _, _| {
                 style.border_2().border_color(rgb(theme.accent))
             })
+            .drag_over::<TabDrag>(move |style, _, _, _| {
+                style.border_2().border_color(rgb(theme.accent))
+            })
             .on_drop(cx.listener(move |this, drag: &PaneDrag, _, cx| {
                 this.drop_copy(drag.clone(), i, pane_tab_id, cx);
+            }))
+            .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                this.move_dragged_tab(drag, i, None, window, cx);
             }))
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 this.drop_external_copy(paths.clone(), i, pane_tab_id, cx);
             }))
-            .child(
-                div()
-                    .id(("pane-tabs", i))
-                    .overflow_x_scroll()
-                    .h(px(font_size + 19.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .bg(rgb(theme.surface))
-                    .border_b_1()
-                    .border_color(rgb(if active { theme.accent } else { theme.border }))
-                    .children(pane.tabs.iter().enumerate().map(|(t, tab)| {
-                        let is_active = t == pane.active;
-                        let path_label = if tab.terminal.is_some() {
-                            format!("Terminal · {}", tab.path.label())
-                        } else {
-                            tab.path.label()
-                        };
-                        let tab_id = tab.id;
-                        let tab_group = format!("pane-{i}-tab-{t}");
-                        div()
-                            .group(tab_group.clone())
-                            .flex_none()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .bg(rgb(if is_active {
-                                theme.background
-                            } else {
-                                theme.surface
-                            }))
-                            .child(
-                                div()
-                                    .id(format!("tab-{i}-{t}"))
-                                    .max_w(px(160. * scale))
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .px_3()
-                                    .h_full()
-                                    .flex()
-                                    .items_center()
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(theme.hover)))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if !this.panes.contains(i)
-                                            || this.panes[i]
-                                                .tabs
-                                                .get(t)
-                                                .is_none_or(|tab| tab.id != tab_id)
-                                        {
-                                            return;
-                                        }
-                                        this.panes[i].active = t;
-                                        this.activate(i, window, cx);
-                                        this.sync_path(i, window, cx);
-                                        this.persist(cx);
-                                    }))
-                                    .child(path_label.clone()),
-                            )
-                            .child(
-                                Button::new(format!("close-tab-{i}-{t}"))
-                                    .ghost()
-                                    .compact()
-                                    .w(px(22.))
-                                    .opacity(0.)
-                                    .group_hover(tab_group, |style| style.opacity(1.))
-                                    .focus_visible(|style| style.opacity(1.))
-                                    .icon(Icon::new(IconName::Close))
-                                    .accessibility_label(format!("Close tab {path_label}"))
-                                    .tooltip(if is_active {
-                                        "Close tab · ⌘W"
-                                    } else {
-                                        "Select and close tab · ⌘W"
-                                    })
-                                    .disabled(pane.tabs.len() <= 1)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if this.panes.contains(i)
-                                            && this.panes[i]
-                                                .tabs
-                                                .get(t)
-                                                .is_some_and(|tab| tab.id == tab_id)
-                                            && this.panes[i].tabs.len() > 1
-                                        {
-                                            if !this.panes.contains(i)
-                                                || this.panes[i]
-                                                    .tabs
-                                                    .get(t)
-                                                    .is_none_or(|tab| tab.id != tab_id)
-                                            {
-                                                return;
-                                            }
-                                            this.panes[i].active = t;
-                                            this.activate(i, window, cx);
-                                            this.command(Command::CloseTab, window, cx);
-                                        }
-                                    })),
-                            )
-                    }))
-                    .child(
-                        Button::new(("new-tab", i))
-                            .secondary()
-                            .compact()
-                            .label("+")
-                            .accessibility_label("New tab")
-                            .tooltip("New tab · ⌘T")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if !this.panes.contains(i) || this.panes[i].tab().id != pane_tab_id
-                                {
-                                    return;
-                                }
-                                this.activate(i, window, cx);
-                                this.command(Command::NewTab, window, cx);
-                            })),
-                    ),
-            )
             .when(file_tab, |panel| {
                 panel
                     .child(
@@ -1693,7 +2186,7 @@ impl Workspace {
                             .flex_none()
                             .px_2()
                             .py_1()
-                            .child(Input::new(&pane.path_input)),
+                            .child(self.render_path_bar(i, window, cx)),
                     )
                     .child(
                         div()
@@ -1706,7 +2199,11 @@ impl Workspace {
                             .text_color(rgb(theme.muted))
                             .border_b_1()
                             .border_color(rgb(theme.border))
-                            .child(div().w(px(12.)))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(12. + 8. + (font_size + 1.).max(12.))),
+                            )
                             .children(
                                 [
                                     (Sort::Name, "Name", None),
@@ -1755,62 +2252,7 @@ impl Workspace {
             })
             .when_some(tab.terminal.clone(), |pane, terminal| {
                 terminal.update(cx, |view, cx| view.set_theme(theme, font_size, cx));
-                pane.child(
-                    div()
-                        .flex_none()
-                        .px_2()
-                        .py_1()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .border_b_1()
-                        .border_color(rgb(theme.border))
-                        .bg(rgb(theme.surface))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_color(rgb(theme.muted))
-                                .child(format!(
-                                    "{} · {}",
-                                    tab.terminal_label,
-                                    terminal.read(cx).status()
-                                )),
-                        )
-                        .child(
-                            Button::new(format!("terminal-files-{i}"))
-                                .ghost()
-                                .compact()
-                                .label("Files")
-                                .tooltip("Focus file tab · ⌘⌥F")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if this.panes.contains(i)
-                                        && this.panes[i].tab().id == pane_tab_id
-                                    {
-                                        this.activate(i, window, cx);
-                                        this.focus_files(window, cx);
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("terminal-end-{i}"))
-                                .ghost()
-                                .compact()
-                                .label("End")
-                                .tooltip("End terminal tab; stops running commands · ⌘⌥K")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if this.panes.contains(i)
-                                        && this.panes[i].tab().id == pane_tab_id
-                                    {
-                                        this.activate(i, window, cx);
-                                        this.end_terminal(window, cx);
-                                    }
-                                })),
-                        ),
-                )
-                .child(div().flex_1().min_h_0().child(terminal).on_mouse_down(
+                pane.child(div().flex_1().min_h_0().child(terminal).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
                         if this.panes.contains(i) && this.panes[i].tab().id == pane_tab_id {
@@ -1867,8 +2309,8 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.colors;
         let font_size = self.preferences.appearance.font_size;
-        let compact_toolbar = window.viewport_size().width < px(900. * font_size / 13.);
         let mut root = div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -1876,7 +2318,11 @@ impl Render for Workspace {
             .text_color(rgb(theme.text))
             .font_family(self.preferences.appearance.font_family.clone())
             .text_size(px(font_size))
-            .key_context("Workspace");
+            .key_context(if self.shortcuts_open {
+                "Shortcuts"
+            } else {
+                "Workspace"
+            });
         macro_rules! action {
             ($ty:ty,$command:expr) => {
                 root = root.on_action(
@@ -1884,6 +2330,7 @@ impl Render for Workspace {
                 );
             };
         }
+        action!(ToggleShortcuts, Command::Shortcuts);
         action!(Settings, Command::Settings);
         action!(ChooseFolder, Command::ChooseFolder);
         root = root
@@ -1912,6 +2359,12 @@ impl Render for Workspace {
         action!(SplitTerminalDown, Command::SplitTerminal(Axis::Down));
         action!(ClosePane, Command::ClosePane);
         action!(ToggleSidebar, Command::Sidebar);
+        action!(FocusSidebar, Command::FocusSidebar);
+        action!(SidebarUp, Command::SidebarUp);
+        action!(SidebarDown, Command::SidebarDown);
+        action!(SidebarExpand, Command::SidebarExpand);
+        action!(SidebarCollapse, Command::SidebarCollapse);
+        action!(SidebarOpen, Command::SidebarOpen);
         action!(Back, Command::Back);
         action!(Forward, Command::Forward);
         action!(Parent, Command::Parent);
@@ -1953,6 +2406,8 @@ impl Render for Workspace {
         root = root
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step_selection(1, cx)))
             .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.step_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &ExpandRow, _, cx| this.expand_selection(cx)))
+            .on_action(cx.listener(|this, _: &CollapseRow, _, cx| this.collapse_selection(cx)))
             .on_action(
                 cx.listener(|this, _: &OpenSelection, window, cx| this.open_selection(window, cx)),
             )
@@ -1962,307 +2417,61 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditPath, window, cx| {
-                this.panes[this.active]
-                    .path_input
-                    .update(cx, |input, cx| input.focus(window, cx));
+                this.command(Command::EditPath, window, cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePalette, window, cx| {
-                this.palette = !this.palette;
-                if this.palette {
-                    this.palette_input.update(cx, |input, cx| {
-                        input.set_value("", window, cx);
-                        input.focus(window, cx);
-                    });
-                } else {
-                    this.activate(this.active, window, cx)
+                if this.connection_screen.is_some() || this.operation_dialog.is_some() {
+                    return;
                 }
-                cx.notify();
+                if this.palette {
+                    this.close_palette(window, cx)
+                } else {
+                    this.open_palette(window, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CheckUpdates, window, cx| {
+                this.command(Command::CheckUpdates, window, cx);
             }))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                if matches!(this.operation_dialog, Some(OperationDialog::Conflict(..))) { return; }
                 this.palette = false;
+                if this.sidebar_focus.is_focused(window) {
+                    this.activate(this.active, window, cx);
+                    return;
+                }
                 this.settings_open = false;
                 this.operation_dialog = None;
                 this.close_connections(window, cx);
                 this.notice = None;
                 this.activate(this.active, window, cx);
             }));
-        root = root.child(
-            div()
-                .h(px(font_size + 25.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .px_3()
-                .gap_4()
-                .bg(rgb(theme.surface))
-                .border_b_1()
-                .border_color(rgb(theme.border))
-                .children(
-                    [
-                        ("← ⌘[", Command::Back),
-                        ("→ ⌘]", Command::Forward),
-                        ("↑ ⌘↑", Command::Parent),
-                        ("Refresh ⌘R", Command::Refresh),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(id, (label, command))| {
-                        div()
-                            .id(("toolbar", id))
-                            .role(gpui_kit::accesskit::Role::Button)
-                            .aria_label(label)
-                            .focusable()
-                            .px_1()
-                            .py_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(rgb(theme.accent)))
-                            .active(|s| s.bg(rgb(theme.selection_hover)))
-                            .focus_visible(|s| {
-                                s.bg(rgb(theme.selection)).text_color(rgb(theme.accent))
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.command(command, window, cx)
-                            }))
-                            .child(if compact_toolbar {
-                                match command {
-                                    Command::Sidebar => "Sidebar",
-                                    Command::Back => "←",
-                                    Command::Forward => "→",
-                                    Command::Parent => "↑",
-                                    Command::Refresh => "Refresh",
-                                    _ => label,
-                                }
-                            } else {
-                                label
-                            })
-                    }),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .id("palette-button")
-                        .role(gpui_kit::accesskit::Role::Button)
-                        .aria_label("Open command palette")
-                        .focusable()
-                        .px_1()
-                        .py_1()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .active(|s| s.bg(rgb(theme.selection_hover)))
-                        .focus_visible(|s| s.bg(rgb(theme.selection)).text_color(rgb(theme.accent)))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.palette = true;
-                            this.palette_input
-                                .update(cx, |input, cx| input.focus(window, cx));
-                            cx.notify();
-                        }))
-                        .child(if compact_toolbar {
-                            "Commands"
-                        } else {
-                            "Commands ⌘⇧P"
-                        }),
-                ),
-        );
-        if self.palette {
-            root = root.child(
-                div()
-                    .flex_none()
-                    .p_3()
-                    .bg(rgb(theme.surface))
-                    .border_b_1()
-                    .border_color(rgb(theme.border))
-                    .child(Input::new(&self.palette_input))
-                    .children(self.filtered_commands(cx).into_iter().enumerate().map(
-                        |(id, (label, shortcut, command))| {
-                            div()
-                                .id(("command", id))
-                                .h(px(font_size + 16.))
-                                .flex()
-                                .items_center()
-                                .px_2()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(rgb(theme.selection)))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.command(command, window, cx);
-                                    this.palette = false;
-                                    if this.operation_dialog.is_none()
-                                        && this.connection_screen.is_none()
-                                        && !this.settings_open
-                                        && !matches!(
-                                            command,
-                                            Command::EditPath
-                                                | Command::Terminal
-                                                | Command::FocusTerminal
-                                                | Command::NewTerminal
-                                        )
-                                    {
-                                        this.activate(this.active, window, cx);
-                                    }
-                                }))
-                                .child(div().flex_1().child(label))
-                                .child(div().text_color(rgb(theme.text)).child(shortcut))
-                        },
-                    )),
-            );
-        }
+        root = root.child(self.render_title_bar(window, cx));
         if self.settings_open {
-            return root.child(self.render_settings(cx));
+            let mut root = root.child(self.render_settings(cx));
+            if self.palette {
+                root = root.child(self.render_palette(window, cx));
+            }
+            return self.with_shortcuts(root, window, cx);
         }
-        root = root.child(
+        let main = div().size_full().min_w_0().flex().flex_col().child(
             div()
                 .flex_1()
                 .min_h_0()
-                .flex()
-                .when(self.preferences.sidebar_visible, |body| {
-                    body.child(
-                        div()
-                            .w(px(160.))
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .py_3()
-                            .px_2()
-                            .gap_2()
-                            .bg(rgb(theme.sidebar))
-                            .border_r_1()
-                            .border_color(rgb(theme.border))
-                            .child(
-                                div()
-                                    .px_1()
-                                    .text_size(px((font_size - 1.).max(10.)))
-                                    .text_color(rgb(theme.muted))
-                                    .child("FAVORITES · ⌘D Add"),
-                            )
-                            .children(self.preferences.favorites.iter().enumerate().map(
-                                |(id, path)| {
-                                    let path = path.clone();
-                                    let label = path
-                                        .file_name()
-                                        .unwrap_or(path.as_os_str())
-                                        .to_string_lossy()
-                                        .into_owned();
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .id(("favorite", id))
-                                                .flex_1()
-                                                .px_1()
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.navigate(
-                                                            this.active,
-                                                            Location::Local(path.clone()),
-                                                            true,
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    },
-                                                ))
-                                                .child(label),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(("remove-favorite", id))
-                                                .px_1()
-                                                .cursor_pointer()
-                                                .text_color(rgb(theme.muted))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if !this.preferences_loaded {
-                                                        return;
-                                                    }
-                                                    this.preferences.favorites.remove(id);
-                                                    this.persist(cx);
-                                                    cx.notify();
-                                                }))
-                                                .child("×"),
-                                        )
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .mt_4()
-                                    .px_1()
-                                    .text_size(px((font_size - 1.).max(10.)))
-                                    .text_color(rgb(theme.muted))
-                                    .child("LOCATIONS"),
-                            )
-                            .child(
-                                div()
-                                    .id("local-root")
-                                    .px_1()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.navigate(
-                                            this.active,
-                                            Location::Local(PathBuf::from("/")),
-                                            true,
-                                            window,
-                                            cx,
-                                        )
-                                    }))
-                                    .child("Local disk"),
-                            )
-                            .when(cfg!(target_os = "macos"), |sidebar| {
-                                sidebar.child(
-                                    Button::new("mounted-volumes")
-                                        .secondary()
-                                        .compact()
-                                        .label("Mounted volumes")
-                                        .accessibility_label("Browse mounted volume roots")
-                                        .tooltip("Browse mounted macOS volumes at /Volumes")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.navigate(
-                                                this.active,
-                                                Location::Local(PathBuf::from("/Volumes")),
-                                                true,
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .mt_4()
-                                    .text_size(px((font_size - 1.).max(10.)))
-                                    .text_color(rgb(theme.muted))
-                                    .child("CONNECTIONS"),
-                            )
-                            .children(self.connections.iter().enumerate().map(|(id, record)| {
-                                let record = record.clone();
-                                let label = record.name.clone();
-                                div()
-                                    .id(("connection-sidebar", id))
-                                    .px_1()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.connect_record(&record, window, cx)
-                                    }))
-                                    .child(label)
-                            }))
-                            .child(
-                                div()
-                                    .id("manage-connections")
-                                    .px_1()
-                                    .cursor_pointer()
-                                    .text_color(rgb(theme.accent))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.connection_screen = Some(ConnectionScreen::List);
-                                        cx.notify();
-                                    }))
-                                    .child("Manage · ⌘⇧C"),
-                            ),
+                .child(self.render_layout(&self.layout, window, cx)),
+        );
+        root = root.child(
+            div().flex_1().min_h_0().flex().child(
+                h_resizable("sidebar-split")
+                    .with_state(&self.sidebar_split)
+                    .child(
+                        resizable_panel()
+                            .visible(self.preferences.sidebar_visible)
+                            .size(px(sidebar::SIDEBAR_WIDTH))
+                            .size_range(px(120.)..px(480.))
+                            .child(self.render_sidebar(window, cx)),
                     )
-                })
-                .child(div().flex_1().min_w_0().child(self.render_layout(
-                    &self.layout,
-                    window,
-                    cx,
-                ))),
+                    .child(resizable_panel().child(main)),
+            ),
         );
         if self.connection_screen.is_some() {
             root = root.child(self.render_connections(cx));
@@ -2289,7 +2498,7 @@ impl Render for Workspace {
             .iter()
             .filter_map(|i| tab.entries.get(*i).and_then(|e| e.size))
             .sum();
-        root.child(
+        let root = root.child(
             div()
                 .h(px(font_size + 14.))
                 .flex_none()
@@ -2327,6 +2536,9 @@ impl Render for Workspace {
                     "Hidden off"
                 })
                 .child(format!("{} jobs", self.jobs.len()))
+                .when(self.preferences.vim_mode && tab.terminal.is_none(), |bar| {
+                    bar.child(div().text_color(rgb(theme.accent)).child(self.vim_status()))
+                })
                 .child(
                     div()
                         .flex()
@@ -2354,23 +2566,6 @@ impl Render for Workspace {
                                 })),
                         )
                         .child(
-                            Button::new("status-terminal")
-                                .ghost()
-                                .compact()
-                                .icon(Icon::new(IconName::SquareTerminal))
-                                .selected(tab.terminal.is_some())
-                                .toggled(tab.terminal.is_some())
-                                .accessibility_label(if tab.terminal.is_some() {
-                                    "Switch to files; keep terminal running"
-                                } else {
-                                    "Focus terminal tab"
-                                })
-                                .tooltip("Toggle terminal · ⌃` · Focus terminal ⌘⌥J")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.command(Command::Terminal, window, cx)
-                                })),
-                        )
-                        .child(
                             Button::new("status-transfers")
                                 .ghost()
                                 .compact()
@@ -2392,6 +2587,12 @@ impl Render for Workspace {
                                 })),
                         ),
                 ),
-        )
+        );
+        let root = if self.palette {
+            root.child(self.render_palette(window, cx))
+        } else {
+            root
+        };
+        self.with_shortcuts(root, window, cx)
     }
 }

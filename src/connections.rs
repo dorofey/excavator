@@ -35,6 +35,12 @@ pub struct ConnectionRecord {
     pub endpoint: String,
     #[serde(default)]
     pub ca_bundle: String,
+    /// User-defined non-secret group name; empty means Ungrouped.
+    #[serde(default)]
+    pub group: String,
+    /// Optional path to an OpenSSH-compatible private key; key bytes remain on disk.
+    #[serde(default)]
+    pub ssh_key_path: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -44,6 +50,8 @@ pub struct ConnectionSecrets {
     pub access_key: String,
     pub secret_key: String,
     pub session_token: String,
+    #[serde(default)]
+    pub ssh_key_passphrase: String,
 }
 impl std::fmt::Debug for ConnectionSecrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,6 +67,12 @@ impl ConnectionRecord {
         {
             return Err("Custom CA bundle must be an absolute local file path".into());
         }
+        if !self.ssh_key_path.is_empty()
+            && (!std::path::Path::new(&self.ssh_key_path).is_absolute()
+                || self.ssh_key_path.chars().any(char::is_control))
+        {
+            return Err("SSH private key must be an absolute local file path".into());
+        }
         if self.id.is_empty()
             || self.id.len() > 128
             || !self
@@ -70,6 +84,15 @@ impl ConnectionRecord {
         }
         if self.name.trim().is_empty() || self.name.chars().any(char::is_control) {
             return Err("A connection name without control characters is required".into());
+        }
+        if self.group.len() > 128
+            || self.group.chars().any(char::is_control)
+            || (!self.group.is_empty() && self.group.trim() != self.group)
+        {
+            return Err("Connection group must be at most 128 characters without leading/trailing whitespace or control characters".into());
+        }
+        if self.protocol != Protocol::Sftp && !self.ssh_key_path.is_empty() {
+            return Err("SSH private keys are available only for SFTP connections".into());
         }
         for field in [
             &self.host,
@@ -156,6 +179,8 @@ struct Store {
     version: u32,
     records: Vec<ConnectionRecord>,
     known_hosts: BTreeMap<String, TrustedHost>,
+    #[serde(default)]
+    groups: Vec<String>,
 }
 impl Default for Store {
     fn default() -> Self {
@@ -163,6 +188,7 @@ impl Default for Store {
             version: 1,
             records: vec![],
             known_hosts: BTreeMap::new(),
+            groups: vec![],
         }
     }
 }
@@ -192,7 +218,7 @@ fn read_store() -> Result<Store, String> {
         Err(error) => return Err(format!("Cannot read connection metadata: {error}")),
     };
     // Do not include JSON decoder text: a corrupt file could contain secret material.
-    let store: Store = serde_json::from_slice(&bytes)
+    let mut store: Store = serde_json::from_slice(&bytes)
         .map_err(|_| "Connection metadata is corrupt; original file preserved".to_string())?;
     if store.version != 1 {
         return Err("Unsupported connection metadata version; original file preserved".into());
@@ -204,6 +230,14 @@ fn read_store() -> Result<Store, String> {
             return Err("Connection metadata contains duplicate IDs".into());
         }
     }
+    // Older metadata and imports may assign groups without a separate catalog.
+    for record in &store.records {
+        if !record.group.is_empty() && !store.groups.contains(&record.group) {
+            store.groups.push(record.group.clone());
+        }
+    }
+    store.groups.sort_by_key(|group| group.to_lowercase());
+    store.groups.dedup();
     Ok(store)
 }
 fn write_store(store: &Store) -> Result<(), String> {
@@ -238,6 +272,79 @@ pub fn load() -> Result<Vec<ConnectionRecord>, String> {
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
     Ok(read_store()?.records)
+}
+pub fn load_groups() -> Result<Vec<String>, String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Connection metadata lock failed")?;
+    Ok(read_store()?.groups)
+}
+fn validate_group_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.trim() != name
+        || name.len() > 128
+        || name.chars().any(char::is_control)
+    {
+        return Err("Group name must contain 1–128 characters without leading/trailing whitespace or control characters".into());
+    }
+    Ok(())
+}
+pub fn save_group(name: &str) -> Result<Vec<String>, String> {
+    validate_group_name(name)?;
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Connection metadata lock failed")?;
+    let mut store = read_store()?;
+    if !store.groups.iter().any(|group| group == name) {
+        store.groups.push(name.to_string());
+        store.groups.sort_by_key(|group| group.to_lowercase());
+        write_store(&store)?;
+    }
+    Ok(store.groups)
+}
+pub fn rename_group(old: &str, new: &str) -> Result<(Vec<String>, Vec<ConnectionRecord>), String> {
+    validate_group_name(new)?;
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Connection metadata lock failed")?;
+    let mut store = read_store()?;
+    if old != new
+        && store
+            .groups
+            .iter()
+            .any(|group| group.eq_ignore_ascii_case(new))
+    {
+        return Err("A group with that name already exists".into());
+    }
+    let Some(index) = store.groups.iter().position(|group| group == old) else {
+        return Err("The connection group no longer exists".into());
+    };
+    store.groups[index] = new.to_string();
+    for record in &mut store.records {
+        if record.group == old {
+            record.group = new.to_string();
+        }
+    }
+    store.groups.sort_by_key(|group| group.to_lowercase());
+    write_store(&store)?;
+    Ok((store.groups, store.records))
+}
+pub fn delete_group(name: &str) -> Result<(Vec<String>, Vec<ConnectionRecord>), String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Connection metadata lock failed")?;
+    let mut store = read_store()?;
+    let Some(index) = store.groups.iter().position(|group| group == name) else {
+        return Err("The connection group no longer exists".into());
+    };
+    store.groups.remove(index);
+    for record in &mut store.records {
+        if record.group == name {
+            record.group.clear();
+        }
+    }
+    write_store(&store)?;
+    Ok((store.groups, store.records))
 }
 pub struct ImportOutcome {
     pub added: usize,
@@ -309,6 +416,10 @@ pub fn save(record: &ConnectionRecord, secret: &Option<ConnectionSecrets>) -> Re
             serde_json::to_vec(secret).map_err(|_| "Cannot encode connection credentials")?;
         credentials::set(&record.id, &bytes)?;
     }
+    if !record.group.is_empty() && !store.groups.contains(&record.group) {
+        store.groups.push(record.group.clone());
+        store.groups.sort_by_key(|group| group.to_lowercase());
+    }
     if let Some(old) = store.records.iter_mut().find(|old| old.id == record.id) {
         *old = record.clone();
     } else {
@@ -357,6 +468,12 @@ pub fn remove(id: &str) -> Result<(), String> {
 pub fn secrets(id: &str) -> Result<ConnectionSecrets, String> {
     let bytes = credentials::get(id)?
         .ok_or("Connection credentials are missing; edit the connection to provide them")?;
+    serde_json::from_slice(&bytes).map_err(|_| "Stored connection credentials are invalid".into())
+}
+pub fn secrets_or_empty_for_key(id: &str) -> Result<ConnectionSecrets, String> {
+    let Some(bytes) = credentials::get(id)? else {
+        return Ok(ConnectionSecrets::default());
+    };
     serde_json::from_slice(&bytes).map_err(|_| "Stored connection credentials are invalid".into())
 }
 pub fn known_host(record: &ConnectionRecord) -> Result<Option<String>, String> {

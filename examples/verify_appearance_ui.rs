@@ -23,6 +23,8 @@ mod terminal;
 mod transfers;
 #[path = "../src/ui/mod.rs"]
 mod ui;
+#[path = "../src/updater.rs"]
+mod updater;
 use gpui_kit::{prelude::*, *};
 actions!(
     excavator_appearance_fixture,

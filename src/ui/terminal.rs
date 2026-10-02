@@ -17,6 +17,34 @@ pub(super) struct TerminalView {
     marked: String,
     bounds: Bounds<Pixels>,
     requested_size: (u16, u16),
+    font: Font,
+}
+/// Menlo with installed Nerd Font families as glyph fallbacks, so Powerline and
+/// icon code points in prompts render instead of missing-glyph boxes.
+fn terminal_font(window: &Window) -> Font {
+    static FALLBACKS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let fallbacks = FALLBACKS.get_or_init(|| {
+        let names = window.text_system().all_font_names();
+        let mut nerd = names
+            .into_iter()
+            .filter(|name| name.contains("Nerd Font"))
+            .collect::<Vec<_>>();
+        // Prefer the symbols-only and monospaced variants, which keep cell widths.
+        nerd.sort_by_key(|name| {
+            (
+                !name.starts_with("Symbols Nerd Font"),
+                !name.ends_with("Nerd Font Mono"),
+                name.clone(),
+            )
+        });
+        nerd.truncate(3);
+        nerd
+    });
+    let mut font = font("Menlo");
+    if !fallbacks.is_empty() {
+        font.fallbacks = Some(FontFallbacks::from_fonts(fallbacks.clone()));
+    }
+    font
 }
 impl TerminalView {
     pub(super) fn new(
@@ -67,6 +95,7 @@ impl TerminalView {
             marked: String::new(),
             bounds: Bounds::default(),
             requested_size: (14, 80),
+            font: terminal_font(window),
         }
     }
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -200,6 +229,8 @@ impl Render for TerminalView {
         let paint_entity = entity.clone();
         let colors = self.colors;
         let font_size = self.font_size;
+        let base_font = self.font.clone();
+        let paint_font = self.font.clone();
         div()
             .id("terminal-screen")
             .role(gpui_kit::accesskit::Role::Terminal)
@@ -235,7 +266,7 @@ impl Render for TerminalView {
                     move |bounds, window, cx| {
                         let run = TextRun {
                             len: 1,
-                            font: font("Menlo"),
+                            font: base_font.clone(),
                             color: rgb(colors.text).into(),
                             background_color: None,
                             underline: None,
@@ -321,7 +352,7 @@ impl Render for TerminalView {
                                         rgb(bg),
                                     ));
                                     if !cell.text.is_empty() {
-                                        let mut f = font("Menlo");
+                                        let mut f = paint_font.clone();
                                         if cell.bold {
                                             f.weight = FontWeight::BOLD;
                                         }
@@ -365,7 +396,7 @@ impl Render for TerminalView {
                                     );
                                 let run = TextRun {
                                     len: marked.len(),
-                                    font: font("Menlo"),
+                                    font: paint_font.clone(),
                                     color: rgb(colors.text).into(),
                                     background_color: Some(rgb(colors.surface).into()),
                                     underline: Some(UnderlineStyle {

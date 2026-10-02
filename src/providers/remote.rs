@@ -94,7 +94,12 @@ fn config(location: &Location) -> Result<(ConnectionRecord, ConnectionSecrets), 
             "Connection settings are invalid",
         )
     })?;
-    let secrets = connections::secrets(id).map_err(|_| {
+    let secret_result = if record.protocol == Protocol::Sftp && !record.ssh_key_path.is_empty() {
+        connections::secrets_or_empty_for_key(id)
+    } else {
+        connections::secrets(id)
+    };
+    let secrets = secret_result.map_err(|_| {
         error(
             location,
             FsErrorKind::Authentication,
@@ -198,15 +203,29 @@ fn sftp(
         _ => {}
     }
     check(cancel, location)?;
-    session
-        .userauth_password(&record.username, &secrets.password)
-        .map_err(|_| {
-            error(
-                location,
-                FsErrorKind::Authentication,
-                "SSH authentication failed",
-            )
-        })?;
+    let authentication = if record.ssh_key_path.is_empty() {
+        session.userauth_password(&record.username, &secrets.password)
+    } else {
+        session.userauth_pubkey_file(
+            &record.username,
+            None,
+            std::path::Path::new(&record.ssh_key_path),
+            (!secrets.ssh_key_passphrase.is_empty()).then_some(secrets.ssh_key_passphrase.as_str()),
+        )
+        .or_else(|key_error| {
+            // macOS/OpenSSH may keep the unlocked key in the user's agent.
+            // Host identity has already been checked above.
+            check(cancel, location).map_err(|_| key_error)?;
+            session.userauth_agent(&record.username)
+        })
+    };
+    authentication.map_err(|_| {
+        error(
+            location,
+            FsErrorKind::Authentication,
+            "SSH authentication failed; check the key/passphrase and that your SSH agent is available to Excavator",
+        )
+    })?;
     session.sftp().map_err(|_| {
         error(
             location,
@@ -770,6 +789,30 @@ impl ProviderRegistry {
         });
         check(cancel, location)?;
         Ok(entries)
+    }
+    /// Resolve a link only for explicit folder navigation, never for transfers.
+    pub fn linked_directory(&self, location: &Location, cancel: &CancellationToken) -> Result<Location, FsError> {
+        check(cancel, location)?;
+        let target = match location {
+            Location::Local(path) => Location::Local(fs::canonicalize(path).map_err(|e| FsError::from_io(location.clone(), e))?),
+            Location::Sftp { connection, .. } => {
+                let (record, secrets) = self.config(location)?;
+                let client = self.sftp(&record, &secrets, location, cancel)?;
+                let target = client.realpath(Path::new(remote_path(location)?)).map_err(|e| ssh_error(location, e))?;
+                let stat = client.stat(&target).map_err(|e| ssh_error(location, e))?;
+                let target = Location::Sftp { connection: connection.clone(), path: target.to_str().ok_or_else(|| unsupported(location, "Linked folder path is not valid UTF-8"))?.to_string() };
+                if ssh_entry(target.clone(), stat).kind != EntryKind::Directory {
+                    return Err(unsupported(location, "This link does not point to a folder"));
+                }
+                check(cancel, location)?;
+                return Ok(target);
+            }
+            _ => return Err(unsupported(location, "Following folder links is supported for local files and SFTP")),
+        };
+        if self.metadata_sync(&target, cancel)?.kind != EntryKind::Directory {
+            return Err(unsupported(location, "This link does not point to a folder"));
+        }
+        Ok(target)
     }
     pub fn metadata_sync(
         &self,

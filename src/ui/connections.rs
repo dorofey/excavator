@@ -5,6 +5,9 @@ pub(super) enum ConnectionScreen {
     List,
     Import(crate::forklift::ImportPlan),
     Editor(ConnectionRecord),
+    GroupEditor {
+        original: Option<String>,
+    },
     Trust {
         record: ConnectionRecord,
         fingerprint: String,
@@ -36,15 +39,25 @@ const FIELDS: &[&str] = &[
     "Access key (blank keeps stored)",
     "Secret key (blank keeps stored)",
     "Session token (optional)",
+    "Group (optional)",
+    "SSH private key file (optional)",
+    "SSH key passphrase (blank keeps stored)",
 ];
 impl Workspace {
     pub(super) fn load_connections(&mut self, cx: &mut Context<Self>) {
-        let task = cx.background_executor().spawn(async { store::load() });
+        let task = cx
+            .background_executor()
+            .spawn(async { Ok::<_, String>((store::load()?, store::load_groups()?)) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(records) => this.connections = records,
+                    Ok((records, groups)) => {
+                        this.sftp_listing_cache.clear();
+                        this.listing_cache_epoch += 1;
+                        this.connections = records;
+                        this.connection_groups = groups;
+                    }
                     Err(error) => this.notice = Some(error),
                 }
                 cx.notify();
@@ -58,9 +71,11 @@ impl Workspace {
         self.connection_busy = false;
         self.connection_screen = None;
         self.clear_connection_secrets(window, cx);
+        self.activate(self.active, window, cx);
     }
     fn clear_connection_secrets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in &self.connection_inputs[9..] {
+        for index in [9usize, 10, 11, 12, 15] {
+            let input = &self.connection_inputs[index];
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
     }
@@ -85,6 +100,8 @@ impl Workspace {
             region: String::new(),
             endpoint: String::new(),
             ca_bundle: String::new(),
+            group: String::new(),
+            ssh_key_path: String::new(),
         });
         let values = [
             record.name.clone(),
@@ -100,6 +117,9 @@ impl Workspace {
             String::new(),
             String::new(),
             String::new(),
+            record.group.clone(),
+            record.ssh_key_path.clone(),
+            String::new(),
         ];
         for (input, value) in self.connection_inputs.iter().zip(values) {
             input.update(cx, |state, cx| state.set_value(value, window, cx));
@@ -108,6 +128,63 @@ impl Workspace {
         self.palette = false;
         self.notice = None;
         self.connection_inputs[0].update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+    pub(super) fn edit_connection_group(
+        &mut self,
+        original: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_busy {
+            return;
+        }
+        self.clear_connection_secrets(window, cx);
+        self.connection_inputs[13].update(cx, |input, cx| {
+            input.set_value(original.clone().unwrap_or_default(), window, cx)
+        });
+        self.connection_screen = Some(ConnectionScreen::GroupEditor { original });
+        self.notice = None;
+        self.connection_inputs[13].update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+    fn save_connection_group(&mut self, cx: &mut Context<Self>) {
+        if self.connection_busy {
+            return;
+        }
+        let Some(ConnectionScreen::GroupEditor { original }) = self.connection_screen.clone()
+        else {
+            return;
+        };
+        let name = self.connection_inputs[13].read(cx).value().to_string();
+        let (generation, _) = self.begin_connection_task();
+        let task = cx.background_executor().spawn(async move {
+            if let Some(original) = original {
+                store::rename_group(&original, &name)
+            } else {
+                Ok((store::save_group(&name)?, store::load()?))
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.connection_generation {
+                    return;
+                }
+                this.connection_busy = false;
+                match result {
+                    Ok((groups, records)) => {
+                        this.connection_groups = groups;
+                        this.connections = records;
+                        this.connection_screen = Some(ConnectionScreen::List);
+                        this.notice = None;
+                    }
+                    Err(error) => this.notice = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
     fn draft_connection(&self, cx: &App) -> Result<ConnectionRecord, String> {
@@ -138,6 +215,8 @@ impl Workspace {
             } else {
                 String::new()
             },
+            group: value(13),
+            ssh_key_path: value(14),
         };
         draft.validate()?;
         Ok(draft)
@@ -150,6 +229,7 @@ impl Workspace {
                 access_key: value(10),
                 secret_key: value(11),
                 session_token: value(12),
+                ssh_key_passphrase: value(15),
             }
         } else {
             ConnectionSecrets {
@@ -157,6 +237,7 @@ impl Workspace {
                 access_key: String::new(),
                 secret_key: String::new(),
                 session_token: String::new(),
+                ssh_key_passphrase: value(15),
             }
         };
         if [
@@ -164,6 +245,7 @@ impl Workspace {
             &secret.access_key,
             &secret.secret_key,
             &secret.session_token,
+            &secret.ssh_key_passphrase,
         ]
         .iter()
         .all(|s| s.is_empty())
@@ -181,6 +263,13 @@ impl Workspace {
         (self.connection_generation, self.connection_cancel.clone())
     }
     pub(super) fn save_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.connection_screen,
+            Some(ConnectionScreen::GroupEditor { .. })
+        ) {
+            self.save_connection_group(cx);
+            return;
+        }
         if self.connection_busy {
             return;
         }
@@ -197,7 +286,7 @@ impl Workspace {
         let (generation, _) = self.begin_connection_task();
         let task = cx.background_executor().spawn(async move {
             store::save(&record, &secret)?;
-            store::load()
+            Ok::<_, String>((store::load()?, store::load_groups()?))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -207,9 +296,12 @@ impl Workspace {
                 }
                 this.connection_busy = false;
                 match result {
-                    Ok(records) => {
+                    Ok((records, groups)) => {
                         this.connections = records;
+                        this.connection_groups = groups;
                         this.connection_screen = Some(ConnectionScreen::List);
+                        this.sftp_listing_cache.clear();
+                        this.listing_cache_epoch += 1;
                         this.notice = Some(
                             "Connection metadata saved. Any submitted credentials were stored in macOS Keychain.".into(),
                         );
@@ -251,6 +343,9 @@ impl Workspace {
                 }
                 let secret = match secret {
                     Some(secret) => secret,
+                    None if record.protocol == Protocol::Sftp && !record.ssh_key_path.is_empty() => {
+                        store::secrets_or_empty_for_key(&record.id)?
+                    }
                     None => store::secrets(&record.id)?,
                 };
                 match crate::providers::test_connection(&record, &secret, cancel) {
@@ -318,22 +413,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let location = match record.protocol {
-            Protocol::Sftp => Location::Sftp {
-                connection: record.id.clone(),
-                path: record.root.clone(),
-            },
-            Protocol::Ftps => Location::Ftps {
-                connection: record.id.clone(),
-                path: record.root.clone(),
-            },
-            Protocol::S3 => Location::S3 {
-                connection: record.id.clone(),
-                bucket: record.bucket.clone(),
-                key: record.root.clone(),
-                prefix: true,
-            },
-        };
+        let location = record_location(record);
         self.close_connections(window, cx);
         self.navigate(self.active, location, true, window, cx);
         self.activate(self.active, window, cx);
@@ -402,6 +482,13 @@ impl Workspace {
         if self.connection_busy {
             return;
         }
+        if matches!(
+            self.connection_screen,
+            Some(ConnectionScreen::GroupEditor { .. })
+        ) {
+            self.save_connection_group(cx);
+            return;
+        }
         if matches!(self.connection_screen, Some(ConnectionScreen::Import(_))) {
             self.confirm_import(window, cx);
             return;
@@ -434,6 +521,8 @@ impl Workspace {
                 this.connection_busy = false;
                 match result {
                     Ok((message, records, editor)) => {
+                        this.sftp_listing_cache.clear();
+                        this.listing_cache_epoch += 1;
                         this.connections = records;
                         if let Some(record) = editor {
                             this.edit_connection(Some(record), window, cx)
@@ -450,18 +539,28 @@ impl Workspace {
         .detach();
         cx.notify();
     }
-    pub(super) fn render_connections(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_connections(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.colors;
         let screen = self.connection_screen.as_ref().unwrap();
         let mut panel = div()
             .id("connections-panel")
-            .max_h(px(330.))
+            .max_h(px(620.))
             .flex_none()
             .overflow_y_scroll()
             .track_scroll(&self.connection_scroll)
-            .when(matches!(screen, ConnectionScreen::Editor(_)), |d| {
-                d.key_context("ConnectionEditor")
-            })
+            .on_action(cx.listener(|this, _: &NextConnectionField, window, cx| {
+                this.move_connection_focus(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousConnectionField, window, cx| {
+                this.move_connection_focus(-1, window, cx);
+            }))
+            .when(
+                matches!(
+                    screen,
+                    ConnectionScreen::Editor(_) | ConnectionScreen::GroupEditor { .. }
+                ),
+                |d| d.key_context("ConnectionEditor"),
+            )
             .p_3()
             .bg(rgb(theme.surface))
             .border_t_1()
@@ -487,9 +586,16 @@ impl Workspace {
                             .child("Close · Esc"),
                     ),
             );
+        if let Some(notice) = &self.notice {
+            panel = panel.child(
+                div()
+                    .py_2()
+                    .text_color(rgb(theme.warning))
+                    .child(notice.clone()),
+            );
+        }
         if self.connection_busy {
-            return panel
-                .child("Working… Closing cancels the test; an in-flight save may still finish.");
+            panel = panel.child("Working…");
         }
         match screen {
             ConnectionScreen::Import(plan) => {
@@ -548,7 +654,66 @@ impl Workspace {
                             ),
                     );
             }
+            ConnectionScreen::GroupEditor { original } => {
+                panel = panel
+                    .child(if original.is_some() {
+                        "Edit connection group"
+                    } else {
+                        "Add connection group"
+                    })
+                    .child(div().py_2().child(Input::new(&self.connection_inputs[13])))
+                    .child(
+                        Button::new("save-connection-group")
+                            .label("Save group")
+                            .disabled(self.connection_busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.save_connection_group(cx))),
+                    )
+                    .child(
+                        Button::new("cancel-connection-group")
+                            .ghost()
+                            .label("Back to connections")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.connection_screen = Some(ConnectionScreen::List);
+                                this.connection_focus.focus(window, cx);
+                                cx.notify();
+                            })),
+                    );
+            }
             ConnectionScreen::List => {
+                panel =
+                    panel
+                        .child(
+                            div().py_2().flex().gap_3().child(
+                                Button::new("add-connection-group")
+                                    .ghost()
+                                    .label("Add group")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.edit_connection_group(None, window, cx)
+                                    })),
+                            ),
+                        )
+                        .children(self.connection_groups.iter().enumerate().map(
+                            |(index, group)| {
+                                let group = group.clone();
+                                div()
+                                    .py_1()
+                                    .flex()
+                                    .items_center()
+                                    .child(div().flex_1().child(group.clone()))
+                                    .child(
+                                        Button::new(("edit-connection-group", index))
+                                            .ghost()
+                                            .label("Edit group")
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.edit_connection_group(
+                                                    Some(group.clone()),
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
+                            },
+                        ));
                 panel = panel
                     .child(
                         Button::new("import-forklift")
@@ -662,15 +827,53 @@ impl Workspace {
                     ),
                 );
                 let indices = if protocol == Protocol::S3 {
-                    vec![0, 4, 5, 6, 7, 10, 11, 12]
+                    vec![0, 4, 5, 6, 7, 10, 11, 12, 13]
                 } else {
                     if protocol == Protocol::Ftps {
-                        vec![0, 1, 2, 3, 4, 8, 9]
+                        vec![0, 1, 2, 3, 4, 8, 9, 13]
                     } else {
-                        vec![0, 1, 2, 3, 4, 9]
+                        vec![0, 1, 2, 3, 4, 9, 13, 14, 15]
                     }
                 };
-                panel=panel.children(indices.into_iter().map(|i|div().py_1().flex().items_center().gap_3().child(div().w(px(210.)).flex_none().child(FIELDS[i])).child(div().flex_1().child(Input::new(&self.connection_inputs[i]))))).child(div().py_2().text_color(rgb(theme.muted)).child("Blank credential fields preserve the existing Keychain entry. Remote pane state stays in this session."));
+                panel = panel.children(indices.into_iter().map(|i| {
+                    let input = Styled::h(Input::new(&self.connection_inputs[i]), px(32.))
+                        .px(px(10.))
+                        .py(px(4.))
+                        .text_size(px(self.preferences.appearance.font_size));
+                    div().py(px(4.)).flex().items_center().gap_3()
+                        .child(div().w(px(210.)).flex_none().child(FIELDS[i]))
+                        .child(div().flex_1().min_w_0().child(input))
+                })).child(div().py_2().text_color(rgb(theme.muted)).child("Blank credential fields preserve the existing Keychain entry. Remote pane state stays in this session."));
+                if !self.connection_groups.is_empty() {
+                    panel = panel
+                        .child(
+                            div()
+                                .py_1()
+                                .text_color(rgb(theme.muted))
+                                .child("Choose an existing group, or type a new group name above:"),
+                        )
+                        .child(
+                            div().flex().flex_wrap().gap_2().children(
+                                self.connection_groups
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, group)| {
+                                        let group = group.clone();
+                                        Button::new(("choose-connection-group", index))
+                                            .ghost()
+                                            .label(group.clone())
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.connection_inputs[13].update(
+                                                    cx,
+                                                    |input, cx| {
+                                                        input.set_value(group.clone(), window, cx)
+                                                    },
+                                                );
+                                            }))
+                                    }),
+                            ),
+                        );
+                }
                 panel = panel.child(
                     div()
                         .flex()
@@ -735,7 +938,27 @@ impl Workspace {
                 panel=panel.child(format!("Forget the trusted SSH fingerprint for {}:{}?",record.host,record.port)).child("The next test will require a new fingerprint review. This does not accept a replacement key.").child(div().id("confirm-reset-host").py_2().cursor_pointer().text_color(rgb(theme.warning)).on_click(cx.listener(|this,_,window,cx|this.confirm_connection_action(window,cx))).child("Confirm forget trusted key"));
             }
         }
-        panel
+        let weak = cx.entity().downgrade();
+        gpui_kit::base::Dialog::new(cx)
+            .focus_handle(self.connection_focus.clone())
+            .on_ok(|_, _, _| false)
+            .popup(
+                gpui_kit::base::DialogPopup::new()
+                    .w(px(720.))
+                    .max_w(gpui::relative(0.95))
+                    .max_h(px(620.))
+                    .rounded_lg()
+                    .child(panel),
+            )
+            .backdrop(div().size_full().bg(rgba(0x00000080)))
+            .on_open_change(move |open, _, window, cx| {
+                if !open {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.close_connections(window, cx);
+                    });
+                }
+            })
+            .into_any_element()
     }
 }
 impl Workspace {
@@ -773,15 +996,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(
+            self.connection_screen,
+            Some(ConnectionScreen::GroupEditor { .. })
+        ) {
+            self.connection_inputs[13].update(cx, |input, cx| input.focus(window, cx));
+            return;
+        }
         let Some(ConnectionScreen::Editor(record)) = &self.connection_screen else {
             return;
         };
         let fields = if record.protocol == Protocol::S3 {
-            vec![0, 4, 5, 6, 7, 10, 11, 12]
+            vec![0, 4, 5, 6, 7, 10, 11, 12, 13]
         } else if record.protocol == Protocol::Ftps {
-            vec![0, 1, 2, 3, 4, 8, 9]
+            vec![0, 1, 2, 3, 4, 8, 9, 13]
         } else {
-            vec![0, 1, 2, 3, 4, 9]
+            vec![0, 1, 2, 3, 4, 9, 13, 14, 15]
         };
         let current = fields
             .iter()
@@ -897,5 +1127,25 @@ impl Workspace {
             });
         }).detach();
         cx.notify();
+    }
+}
+
+/// The browsing root a saved connection opens at.
+pub(super) fn record_location(record: &ConnectionRecord) -> Location {
+    match record.protocol {
+        Protocol::Sftp => Location::Sftp {
+            connection: record.id.clone(),
+            path: record.root.clone(),
+        },
+        Protocol::Ftps => Location::Ftps {
+            connection: record.id.clone(),
+            path: record.root.clone(),
+        },
+        Protocol::S3 => Location::S3 {
+            connection: record.id.clone(),
+            bucket: record.bucket.clone(),
+            key: record.root.clone(),
+            prefix: true,
+        },
     }
 }

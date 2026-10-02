@@ -64,6 +64,8 @@ fn record(id: &str, protocol: Protocol, port: u16) -> ConnectionRecord {
         } else {
             String::new()
         },
+        group: String::new(),
+        ssh_key_path: String::new(),
     }
 }
 fn location(record: &ConnectionRecord) -> Location {
@@ -108,6 +110,7 @@ fn main() {
         access_key: "fixture".into(),
         secret_key: "fixture-secret".into(),
         session_token: String::new(),
+        ssh_key_passphrase: String::new(),
     };
     let registry = ProviderRegistry::with_connections(vec![
         (sftp.clone(), secret.clone()),

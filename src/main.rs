@@ -11,12 +11,13 @@ mod providers;
 mod terminal;
 mod transfers;
 mod ui;
+mod updater;
 
 actions!(excavator, [Quit]);
 
 fn main() {
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(ui::AppAssets)
         .run(|cx| {
             gpui_kit::init(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
@@ -24,6 +25,7 @@ fn main() {
             cx.set_menus([
                 Menu::new("Excavator").items([
                     MenuItem::action("Settings…", ui::Settings),
+                    MenuItem::action("Check for Updates…", ui::CheckUpdates),
                     MenuItem::separator(),
                     MenuItem::action("Quit Excavator", Quit),
                 ]),
@@ -50,28 +52,20 @@ fn main() {
                     MenuItem::action("Choose Folder for Active Pane…", ui::ChooseFolder),
                     MenuItem::action("Import Connections from ForkLift…", ui::ImportForkLift),
                 ]),
-                Menu::new("Help").items([
-                    MenuItem::action("Keyboard Shortcuts", ui::ToggleShortcuts),
-                ]),
+                Menu::new("Help")
+                    .items([MenuItem::action("Keyboard Shortcuts", ui::ToggleShortcuts)]),
             ]);
             let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
-            if let Err(error) = gpui_kit::open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(640.), px(420.))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Excavator".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                cx,
-                |window, cx| cx.new(|cx| ui::Workspace::new(window, cx)),
-            ) {
+            if let Err(error) =
+                gpui_kit::open_window(ui::window_options(bounds), cx, |window, cx| {
+                    cx.new(|cx| ui::Workspace::new(window, cx))
+                })
+            {
                 eprintln!("Unable to open Excavator window: {error}");
                 cx.quit();
                 return;
             }
             cx.activate(true);
+            let _ = updater::initialize();
         });
 }

@@ -98,6 +98,7 @@ pub struct Preferences {
     pub right: PathBuf,
     pub show_hidden: bool,
     pub sidebar_visible: bool,
+    pub vim_mode: bool,
     pub appearance: AppearanceSettings,
 }
 
@@ -113,6 +114,7 @@ impl Default for Preferences {
             right: PathBuf::from("/"),
             show_hidden: false,
             sidebar_visible: true,
+            vim_mode: false,
             appearance: AppearanceSettings::default(),
         }
     }

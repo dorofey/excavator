@@ -201,6 +201,8 @@ fn sftp(fields: &BTreeMap<String, String>) -> Result<ConnectionRecord, String> {
         region: String::new(),
         endpoint: String::new(),
         ca_bundle: String::new(),
+        group: String::new(),
+        ssh_key_path: String::new(),
     };
     // A URL host is accepted only when it contains no credentials or extra path.
     if record.host.contains("://") {

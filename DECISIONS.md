@@ -634,3 +634,151 @@ cancelled with Ctrl-C before execution, so full paste acceptance remains open.
 This closes the integrated-terminal milestone's rendered keyboard requirement;
 live SSH and the separate ForkLift preview/picker/confirmation checks remain
 unverified. The next section-9 item is optional Vim-mode evaluation.
+
+## Grouped keyboard help
+
+Keyboard help uses the pinned GPUI Kit base Dialog, with a viewport-bounded
+scrolling catalog grouped by general actions, navigation, panes, tabs, operations,
+connections, terminals, and text fields. Shared action labels and shortcuts come
+from the command palette; contextual keys and Quit are included separately.
+Cmd+? toggles help from the workspace or modal; plain ? opens it only in a file
+list, preserving terminal and input typing. Help menu and palette entries expose
+the same action. The modal captures underlying app actions and saves/restores
+the exact focus handle without closing settings, operation forms or the palette.
+Cmd+L now uses the existing file-command guard to avoid focusing a hidden path
+field from a terminal tab.
+
+Source review covered all registered app bindings and modal action guards.
+Locked offline check, formatting and builds passed. An isolated native PTY
+fixture displayed the grouped modal; Cmd+? toggled it closed, Cmd+Option+K was
+blocked while open, and a harmless printf command afterward proved that focus
+returned to the same running shell. Final capture then returned stale frames
+and a fresh fixture timed out, so lower-group scrolling, narrow-window layout,
+text-field restoration and native Help-menu activation remain acceptance gaps.
+The signed macOS bundle was rebuilt with the existing app icon.
+
+## Section 10: Zed-style interaction refinements (2026-10-01)
+
+User feedback on the rendered app produced one integrated UI pass. New files:
+`src/ui/tree.rs` (shared expansion state), `src/ui/sidebar.rs`,
+`src/ui/palette.rs`, `src/ui/file_icons.rs`.
+
+### Implemented
+
+- Closing the last tab of a pane now closes that pane's split, matching the
+  user's protected-pane choice: the last pane on each original side keeps its
+  tab and `⌘W` reports `Keep at least one pane on each side.` The close icon on a
+  sole-tab pane is enabled only while that pane can actually close.
+- Terminals resolve missing code points through installed Nerd Font families:
+  `Font.fallbacks` is built once from `text_system().all_font_names()` filtered to
+  families containing "Nerd Font", preferring symbols-only and monospaced variants
+  (three entries). No font files or new dependencies were added.
+- The sidebar is one vertically scrolling column inside a resizable
+  `h_resizable` panel (200 px default, 120–480 px range) that replaces the fixed
+  160 px column. Favorites, `Local disk`, `Mounted volumes` and saved connections
+  are expandable folder trees: one cancellable provider `list` per expanded node,
+  loading/failed/empty states inline, folder children only. It is keyboard
+  operable: `⌘⌥S` focuses it, `↑`/`↓` move, `→` expands or steps in, `←` collapses
+  or steps out, `Return` opens the node in the active pane, `Esc` returns to the
+  panes. Rows carry `TreeItem` roles, names and `aria-selected`; the container is
+  a focusable `Tree` with its own key context and an accent focus border.
+- Shift-click on a pane's + button opens a terminal tab (`ClickEvent::modifiers`),
+  documented in its tooltip next to `⌘⌥T`.
+- Listings show file-type icons: a selected subset of bundled Lucide SVGs
+  (`icon_assets!`, 21 extras) registered with the default component assets through
+  `AppAssets`, so no full-catalog embed and no copied Zed assets. Mapping is by
+  extension and well-known names, with separate light/dark colors.
+- File listings are trees. Rows keep a depth and indent guides; folder rows carry
+  a chevron (click or `→`/`←`) that loads children asynchronously through the
+  provider registry with its own cancellation token, generation guard and stale
+  rejection. Selection, anchor and cursor follow locations across rebuilds;
+  navigating clears expansions; `⌘R` reloads expanded folders in tree order.
+  Operations use the selected rows' real locations, collapse parent/child
+  duplicates, and rename inside the item's own folder.
+- The separate toolbar row is gone. The window now uses the pinned GPUI Kit
+  `TitleBar` with `TitleBar::window_options()` (transparent title bar, traffic
+  lights at 9/9, `app_owns_titlebar_drag`), holding back/forward/parent icon
+  buttons and a search-command entry that swallows mouse-down so dragging still
+  moves the window.
+- The command palette is a floating modal: dimmed backdrop, centered card, search
+  field with icon, bounded scrolling list, highlighted selection with `↑`/`↓`
+  (captured above the input so single-line inputs do not consume them), `Return`
+  runs, `Esc` or a backdrop click dismisses, and focus returns to the active pane.
+
+### Checks
+
+- `cargo fmt --check`, `cargo check --locked --all-targets`,
+  `cargo clippy --locked --all-targets`: no errors; the pre-existing dead-code and
+  style warnings and the upstream `block 0.1.6` notice remain.
+- `verify_settings`, `verify_appearance`, `verify_locations`, `verify_forklift`,
+  `verify_local`, `verify_transfers`, `verify_credentials`: passed.
+- `verify_splits_ui` passed with added assertions for last-tab split closing, tree
+  row/selection rebuild, and stale-expansion rejection.
+- `verify_terminal_ui` passed again (independent PTYs, retained browser state).
+- Bundle build, `plutil -lint` and strict deep signature verification passed.
+
+### Rendered evidence (signed `dist/Excavator.app`, this host)
+
+- Title bar with traffic lights, back/forward/parent icons and the command search
+  entry; no Refresh row.
+- Palette opened with `⌘⇧P` as a centered modal over a dimmed window; typing
+  "split" filtered the list, and `Split pane right` executed from the palette.
+- `→` expanded a folder in the Documents pane (36 rows, indented child with an
+  indent guide, open-folder glyph); `←` collapsed it again (35 rows).
+- A real Powerline prompt (segments, apple, clock) and explicit
+  `print('\ue0b0\ue0b2\uf07c\uf013\uf1c9\uf418')` rendered as glyphs, not
+  missing-glyph boxes.
+- `⌘⌥T` opened a terminal tab in the active pane; `⌘W` closed that tab; `⌘W` on a
+  pane with one tab removed the split (two panes remained); the next `⌘W` showed
+  `Keep at least one pane on each side.`
+- Sidebar: `⌘⌥S` focused the tree, `↓↓↓` moved to Mounted volumes, `→` expanded it
+  and showed `Recovery` indented; favorites, locations and connections render with
+  folder/server/cloud icons.
+
+### Not verified
+
+- Shift-click on + could not be exercised: the available pointer automation sends
+  plain clicks without modifiers, and the branch is one modifier test.
+- Sidebar divider dragging by pointer was not exercised; keyboard focus, expansion,
+  scrolling and the palette are covered above.
+- VoiceOver speech, reduced motion, large-directory performance, clean-user
+  install and notarization remain unverified as recorded in `CHECKLIST.md`.
+
+## Section 10 follow-up: plain title bar and one top tab row (2026-10-01)
+
+User feedback: remove the back/forward/parent icons and the command search entry
+from the title bar, and move the tabs to the very top. Refresh was removed
+entirely; ⌘R and the palette command remain.
+
+- `render_title_bar` now draws only the Kit `TitleBar` background and border, so
+  the row holds nothing but the macOS window controls. Navigation actions are
+  unchanged as keybindings, palette commands and menu items.
+- Pane tab strips moved out of the pane bodies into one full-width row directly
+  under the title bar. `Layout::geometry` walks the resizable tree once per frame
+  and returns `(leaf, left offset, width)` for every pane, using the same
+  `ResizableState` sizes the layout itself uses; each strip is absolutely
+  positioned at that offset and width, so nested right/down splits stay aligned.
+  The row is the width of the main area (window minus the sidebar divider) and
+  keeps each pane's own background, active-tab accent, hover-revealed close icons,
+  reserved close-button space, `+` button and ⇧-click terminal behavior.
+  `render_pane_tabs` is the shared strip renderer used only by the row.
+- `verify_splits_ui` asserts the geometry contract: strips cover every leaf in
+  layout order, the first starts at the row edge, offsets never move backwards,
+  the last strip stays inside the row with positive width, and no strip
+  references a closed pane.
+
+### Checks
+
+- `cargo fmt --check`, `cargo check --locked --all-targets`,
+  `cargo clippy --locked --all-targets`: no errors; only the pre-existing
+  dead-code/style warnings and the upstream `block 0.1.6` notice.
+- `verify_splits_ui` passed including the new top tab-row assertions.
+- Bundle rebuild, `plutil -lint` and strict deep signature verification passed.
+
+### Not verified
+
+The rendered screenshot for this change could not be captured: `screencapture`
+started returning all-black frames and rejected rectangle captures on this host
+after the rebuild, and System Events reported zero windows for the process while
+the binary itself stayed alive until killed. Layout alignment is therefore
+covered by the geometry assertions above, not by a screenshot.

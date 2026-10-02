@@ -17,6 +17,14 @@ pub(super) enum Layout {
     },
 }
 impl Layout {
+    /// Panes that touch the workspace's top edge and use the title-bar tabs.
+    pub fn top_leaves(&self) -> Vec<usize> {
+        match self {
+            Self::Leaf(id) => vec![*id],
+            Self::Split { axis: Axis::Down, children, .. } => children[0].top_leaves(),
+            Self::Split { children, .. } => children.iter().flat_map(|c| c.top_leaves()).collect(),
+        }
+    }
     pub fn leaves(&self) -> Vec<usize> {
         match self {
             Self::Leaf(id) => vec![*id],
@@ -58,6 +66,48 @@ impl Layout {
             } => {
                 let child = children.iter().find(|c| c.leaves().contains(&target))?;
                 child.nearest(target).or_else(|| Some(state.clone()))
+            }
+        }
+    }
+    /// Left offset and width of every leaf in layout order, so the window's top
+    /// tab row can align each pane's strip above its pane.
+    pub fn geometry(&self, available: Pixels, cx: &App) -> Vec<(usize, Pixels, Pixels)> {
+        let mut leaves = Vec::new();
+        self.collect_geometry(px(0.), available, cx, &mut leaves);
+        leaves
+    }
+    fn collect_geometry(
+        &self,
+        left: Pixels,
+        available: Pixels,
+        cx: &App,
+        out: &mut Vec<(usize, Pixels, Pixels)>,
+    ) {
+        match self {
+            Self::Leaf(id) => out.push((*id, left, available)),
+            Self::Split {
+                axis,
+                state,
+                children,
+                ..
+            } => {
+                let width = |index: usize| match axis {
+                    Axis::Down => available,
+                    Axis::Right => state
+                        .read(cx)
+                        .sizes()
+                        .get(index)
+                        .copied()
+                        .filter(|width| *width > px(0.))
+                        .unwrap_or(available / 2.),
+                };
+                let first = width(0);
+                children[0].collect_geometry(left, first, cx, out);
+                let second_left = match axis {
+                    Axis::Right => left + first,
+                    Axis::Down => left,
+                };
+                children[1].collect_geometry(second_left, width(1), cx, out);
             }
         }
     }
@@ -238,6 +288,16 @@ impl Workspace {
         self.layout.replace_leaf(self.active, split);
         self.request_listing(id, cx);
         self.activate(id, window, cx);
+    }
+    /// Whether `id` is a split that can close without emptying an original side.
+    pub(super) fn can_close_pane(&self, id: usize) -> bool {
+        let Layout::Split { children, .. } = &self.layout else {
+            return false;
+        };
+        children
+            .iter()
+            .find(|group| group.leaves().contains(&id))
+            .is_some_and(|group| group.leaves().len() > 1)
     }
     pub(super) fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Layout::Split { children, .. } = &mut self.layout else {
@@ -437,8 +497,96 @@ impl Workspace {
         assert_eq!(self.layout.leaves(), vec![replacement, 1]);
         self.command(Command::Split(Axis::Right), window, cx);
         self.command(Command::Split(Axis::Down), window, cx);
+        let last_tab_pane = self.active;
+        assert_eq!(self.panes[last_tab_pane].tabs.len(), 1);
+        self.command(Command::CloseTab, window, cx);
+        assert!(
+            !self.panes.contains(last_tab_pane),
+            "closing a split's last tab closes the split"
+        );
+        let sole = self.root_panes()[1];
+        assert_eq!(self.layout.leaves().last(), Some(&sole));
+        self.activate(sole, window, cx);
+        let tabs = self.panes[sole].tabs.len();
+        self.command(Command::CloseTab, window, cx);
+        if tabs == 1 {
+            assert!(
+                self.panes.contains(sole),
+                "sole pane on a side keeps its tab"
+            );
+        }
+
+        let total = px(900.);
+        let geometry = self.layout.geometry(total, cx);
+        assert_eq!(
+            geometry.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+            self.layout.leaves(),
+            "top tab row covers every pane in layout order"
+        );
+        assert_eq!(geometry[0].1, px(0.), "first strip starts at the row edge");
+        assert!(
+            geometry.windows(2).all(|pair| pair[0].1 <= pair[1].1),
+            "strips advance left to right: {geometry:?}"
+        );
+        let last = geometry.last().expect("at least one strip");
+        assert!(
+            last.1 + last.2 <= total && last.2 > px(0.),
+            "strips stay inside the row: {geometry:?}"
+        );
+        assert!(
+            geometry.iter().all(|(id, _, _)| self.panes.contains(*id)),
+            "strips only reference live panes"
+        );
+
+        let tab = self.panes[sole].tab_mut();
+        let root = tab.path.clone();
+        let entry = |location: Location, name: &str, kind: EntryKind| Entry {
+            id: crate::domain::EntryId(location.clone()),
+            location,
+            name: name.into(),
+            kind,
+            size: None,
+            modified: None,
+        };
+        let folder = root.join(std::ffi::OsStr::new("folder")).unwrap();
+        let nested = folder.join(std::ffi::OsStr::new("nested.txt")).unwrap();
+        tab.root_entries = vec![
+            entry(
+                root.join(std::ffi::OsStr::new("z.txt")).unwrap(),
+                "z.txt",
+                EntryKind::File,
+            ),
+            entry(folder.clone(), "folder", EntryKind::Directory),
+        ];
+        tab.sort_entries();
+        assert_eq!(tab.entries[0].location, folder, "folders sort first");
+        tab.selected.insert(1);
+        tab.selection_cursor = Some(1);
+        let token = tab.tree.begin(&folder);
+        assert!(tab.tree.finish(
+            &folder,
+            &token,
+            super::tree::Children::Loaded(vec![entry(
+                nested.clone(),
+                "nested.txt",
+                EntryKind::File
+            )]),
+        ));
+        tab.rebuild_rows();
+        assert_eq!(tab.entries.len(), 3);
+        assert_eq!((tab.entries[1].location.clone(), tab.depth(1)), (nested, 1));
+        assert!(tab.selected.contains(&2), "selection follows its location");
+        let stale = tab.tree.begin(&folder);
+        tab.tree.collapse(&folder);
+        assert!(
+            !tab.tree
+                .finish(&folder, &stale, super::tree::Children::Loaded(vec![]))
+        );
+        tab.rebuild_rows();
+        assert_eq!(tab.entries.len(), 2);
+        assert_eq!(tab.selection_cursor, Some(1));
         println!(
-            "PASS: real split/close/focus commands; independent state; cancelled pending pane; stable IDs; collapsed roots; stale drag rejected; recent transfer destination beyond pane 1"
+            "PASS: real split/close/focus commands; independent state; cancelled pending pane; stable IDs; collapsed roots; stale drag rejected; recent transfer destination beyond pane 1; last-tab split close; tree rows/selection/stale expansion; top tab-row geometry"
         );
     }
 }

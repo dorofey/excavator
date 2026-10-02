@@ -19,6 +19,8 @@ fn record() -> ConnectionRecord {
         region: String::new(),
         endpoint: String::new(),
         ca_bundle: String::new(),
+        group: String::new(),
+        ssh_key_path: String::new(),
     }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {

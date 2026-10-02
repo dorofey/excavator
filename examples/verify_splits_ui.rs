@@ -23,6 +23,8 @@ mod terminal;
 mod transfers;
 #[path = "../src/ui/mod.rs"]
 mod ui;
+#[path = "../src/updater.rs"]
+mod updater;
 use gpui_kit::{prelude::*, *};
 actions!(excavator_split_fixture, [Quit]);
 fn main() {
@@ -30,7 +32,7 @@ fn main() {
     std::fs::create_dir_all(&fixture).unwrap();
     let cleanup = fixture.clone();
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(ui::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             let quit_cleanup = fixture.clone();
