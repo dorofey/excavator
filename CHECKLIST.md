@@ -231,3 +231,13 @@ Sparkle-enabled app. Source commit: 5f116fe.
 
 - [x] Verify tab dragging in normal use; user reports it works (2026-10-02).
 - [ ] Verify terminal-session continuity after dragging a terminal tab between panes/splits.
+
+## 11. Release update acceptance (2026-10-02)
+- [x] Publish 0.2.1 with the local Trash/Vim fix and signed ZIP/delta archives.
+- [x] Exercise native update detection from the running 0.2.0 app; Sparkle showed 0.2.1 and its changelog.
+- [x] Exercise download, Install and Relaunch; the relaunched app's Check for Updates reported “Excavator 0.2.1 is currently the newest version available.”
+- [ ] Verify the corrected local Trash confirmation and a disposable-file Trash round trip. Native automation timed out after dismissing the up-to-date alert, so this interaction is not claimed.
+
+Source release commit: 476b690. Published release:
+https://github.com/dorofey/excavator/releases/tag/v0.2.1. Signing remains ad hoc;
+Developer ID and notarization are still pending.
