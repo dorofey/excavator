@@ -264,3 +264,9 @@ default cell backgrounds avoid individual quads. Worker/cancellation polling
 is reduced. Down-split panels use bounded, clipped contents to prevent intrinsic
 listing/terminal height pushing the lower pane outside the viewport. Integrated
 cargo check passed; native split behavior and CPU improvement remain unverified.
+
+0.2.2 prerelease published with CPU/RAM graphs, idle terminal optimizations and
+the Down-split layout correction. Optimized build and deep bundle signature
+verification passed; signed ZIP and deltas uploaded. Native split/CPU acceptance
+remains pending. Source commit: b32cd36.
+https://github.com/dorofey/excavator/releases/tag/v0.2.2

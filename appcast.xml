@@ -1,15 +1,29 @@
-<?xml version="1.0" standalone="yes"?>
+<?xml version='1.0' encoding='utf-8'?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>Excavator</title>
         <item>
-            <title>0.2.1</title>
-            <pubDate>Fri, 02 Oct 2026 20:48:05 +0200</pubDate>
-            <sparkle:version>0.2.1</sparkle:version>
-            <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+            <title>0.2.2</title>
+            <pubDate>Fri, 02 Oct 2026 21:29:49 +0200</pubDate>
+            <sparkle:version>0.2.2</sparkle:version>
+            <sparkle:shortVersionString>0.2.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# Changelog
+            <description sparkle:format="markdown"># Changelog
+
+## 0.2.2 — 2026-10-02
+
+### Added
+- CPU and resident RAM in the status bar, with a click-to-open graph popup and command-palette access. Graphs collect every two seconds while open and keep at most 120 samples in memory.
+
+### Fixed
+- Bound split-panel contents to prevent the lower pane being pushed out of view.
+- Isolate usage redraws from the file-browser workspace.
+- Avoid idle terminal grid copies, share paint snapshots, skip default cell backgrounds, and reduce polling.
+
+### Verification
+- User confirmed Trash/restoration, SFTP caching/failure recovery, tab dragging and modal interaction.
+- Build checks pass; the new split correction and CPU improvements still require live acceptance. This remains an ad hoc signed, non-notarized prerelease.
 
 ## 0.2.1 — 2026-10-02
 
@@ -43,10 +57,58 @@ This is a prerelease, ad hoc signed and not notarized. The updater framework and
 app build compile; live update installation, native Vim acceptance, clean-user
 installation and large-directory performance remain unverified. Remote fixture
 coverage does not establish interoperability with every external provider.
-]]></description>
-            <enclosure url="https://github.com/dorofey/excavator/releases/download/v0.2.1/Excavator-0.2.1-macos-arm64.zip" length="13598312" type="application/octet-stream" sparkle:edSignature="R5B0IkMXMsX5ec8hvAC3d6cbgHYcQAjsDNSOIxSoY0opecILtk2L6PGYdr3AS84qD5jcm78TFUw0D5ADGWF5DQ=="/>
+</description>
+            <enclosure url="https://github.com/dorofey/excavator/releases/download/v0.2.2/Excavator-0.2.2-macos-arm64.zip" length="13675060" type="application/octet-stream" sparkle:edSignature="5ObzpExxsD1U7IewFE3qrvgtVz2YGF8p85+GSHWAOy7jTbqLJIIxhdzCbxQV+JuinHo/yamKznNmpLs6DMLcBw==" />
             <sparkle:deltas>
-                <enclosure url="https://github.com/dorofey/excavator/releases/download/v0.2.1/Excavator0.2.1-0.2.0.delta" sparkle:deltaFrom="0.2.0" length="426906" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="941872" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="mW2UiTJciwfkYFhIjflCKeyELqX3yMT8RRh0Hgi8k/pHYGij4h7xDWvQRBRdABjXAtGGIEDH1FNiL40qKkvmDw=="/>
+                <enclosure url="https://github.com/dorofey/excavator/releases/download/v0.2.2/Excavator0.2.2-0.2.1.delta" sparkle:deltaFrom="0.2.1" length="1361114" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="941872" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="KyEOyb6afixQXTRtTFivEeW0aNmlNf4pHfGBh7TBJ5F+SR4Wzxh2bZSGQOxbrazGulk+SJf+v9LSt7zRQTw0DQ==" />
+                <enclosure url="https://github.com/dorofey/excavator/releases/download/v0.2.2/Excavator0.2.2-0.2.0.delta" sparkle:deltaFrom="0.2.0" length="1363850" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="941872" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="yI70fHAK4zcyXQ8xhM4ovX/kVSswMAPiwsxRrqk1dV2/J4RjxdyA5mG0aikViHJsFHS21D3W/zB8DOghhxe+DQ==" />
+            </sparkle:deltas>
+        </item>
+        <item>
+            <title>0.2.1</title>
+            <pubDate>Fri, 02 Oct 2026 20:48:05 +0200</pubDate>
+            <sparkle:version>0.2.1</sparkle:version>
+            <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"># Changelog
+
+## 0.2.1 — 2026-10-02
+
+### Fixed
+- Vim `dd` now reviews moving local files to macOS Trash instead of requesting unsupported permanent deletion. Remote files retain explicit permanent-deletion confirmation.
+- Local delete requests use Trash consistently, with accurate confirmation text.
+
+### Verification
+- Tab dragging reported working by the user.
+- Update installation/relaunch and the corrected Trash interaction are being checked; this remains an ad hoc signed, non-notarized prerelease.
+
+## 0.2.0 — 2026-10-02
+
+### Added
+- Optional Vim navigation and selection, search, history, tab and split bindings, reviewed operations, and a settings toggle.
+- Drag tabs between panes and splits while preserving terminal sessions and file history.
+- Clickable path breadcrumbs and a compact loading indicator.
+- SFTP directory caching with background revalidation, symlink-directory navigation, SSH key passphrase and agent authentication support.
+- Connection groups and modal connection management/editing.
+- In-app update checks, downloads, signed-archive verification, installation and relaunch through Sparkle.
+
+### Changed
+- Align sidebar search and tab strips with their panes, including nested splits and hidden sidebar.
+- Separate file and terminal tab buttons; Option-click splits down and Shift-Option-click splits right.
+- Compact sidebar hierarchy, improve input/tab padding, and distinguish remote tabs with icons.
+- Present operation reviews and transfer conflict decisions as centered modals; replacement needs explicit confirmation.
+- Require macOS 12 for the update-enabled Apple Silicon bundle.
+
+### Release status
+This is a prerelease, ad hoc signed and not notarized. The updater framework and
+app build compile; live update installation, native Vim acceptance, clean-user
+installation and large-directory performance remain unverified. Remote fixture
+coverage does not establish interoperability with every external provider.
+</description>
+            <enclosure url="https://github.com/dorofey/excavator/releases/download/v0.2.1/Excavator-0.2.1-macos-arm64.zip" length="13598312" type="application/octet-stream" sparkle:edSignature="R5B0IkMXMsX5ec8hvAC3d6cbgHYcQAjsDNSOIxSoY0opecILtk2L6PGYdr3AS84qD5jcm78TFUw0D5ADGWF5DQ==" />
+            <sparkle:deltas>
+                <enclosure url="https://github.com/dorofey/excavator/releases/download/v0.2.1/Excavator0.2.1-0.2.0.delta" sparkle:deltaFrom="0.2.0" length="426906" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="941872" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="mW2UiTJciwfkYFhIjflCKeyELqX3yMT8RRh0Hgi8k/pHYGij4h7xDWvQRBRdABjXAtGGIEDH1FNiL40qKkvmDw==" />
             </sparkle:deltas>
         </item>
         <item>
@@ -56,7 +118,7 @@ coverage does not establish interoperability with every external provider.
             <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/dorofey/excavator/releases/download/v0.2.0/Excavator-0.2.0-macos-arm64.zip" length="13599951" type="application/octet-stream" sparkle:edSignature="OhLc/610cRjbLvmjJz8/OaDUntV61wF+KRnlk4tPvqUuoWp1vb8cJOxuDQdwB7Wwymi/2lMQtUlf86EDWDjIAQ=="/>
+            <enclosure url="https://github.com/dorofey/excavator/releases/download/v0.2.0/Excavator-0.2.0-macos-arm64.zip" length="13599951" type="application/octet-stream" sparkle:edSignature="OhLc/610cRjbLvmjJz8/OaDUntV61wF+KRnlk4tPvqUuoWp1vb8cJOxuDQdwB7Wwymi/2lMQtUlf86EDWDjIAQ==" />
         </item>
     </channel>
 </rss>
