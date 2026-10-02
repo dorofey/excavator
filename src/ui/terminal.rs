@@ -4,11 +4,11 @@ use crate::{
     terminal::{Color, Launch, Session, Snapshot, Status},
 };
 use gpui_kit::{prelude::*, *};
-use std::{ops::Range, time::Duration};
+use std::{ops::Range, sync::Arc, time::Duration};
 
 pub(super) struct TerminalView {
     session: Option<Session>,
-    snapshot: Option<Snapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     failure: Option<String>,
     focus: FocusHandle,
     colors: Tokens,
@@ -66,15 +66,14 @@ impl TerminalView {
                     .await;
                 if this
                     .update(cx, |this, cx| {
-                        if let Some(snapshot) = this.session.as_ref().and_then(Session::snapshot) {
-                            if this
-                                .snapshot
-                                .as_ref()
-                                .is_none_or(|old| old.revision != snapshot.revision)
-                            {
-                                this.snapshot = Some(snapshot);
-                                cx.notify();
-                            }
+                        let revision = this.snapshot.as_ref().map(|old| old.revision);
+                        if let Some(snapshot) = this
+                            .session
+                            .as_ref()
+                            .and_then(|session| session.snapshot_since(revision))
+                        {
+                            this.snapshot = Some(Arc::new(snapshot));
+                            cx.notify();
                         }
                     })
                     .is_err()
@@ -122,7 +121,7 @@ impl TerminalView {
     pub(super) fn snapshot_text(&self) -> String {
         self.snapshot
             .as_ref()
-            .map(Snapshot::text)
+            .map(|snapshot| snapshot.text())
             .unwrap_or_default()
     }
     pub(super) fn send_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
@@ -347,10 +346,14 @@ impl Render for TerminalView {
                                         }
                                     }
                                     let width = if cell.wide { cw * 2. } else { cw };
-                                    window.paint_quad(fill(
-                                        Bounds::new(origin, size(width, lh)),
-                                        rgb(bg),
-                                    ));
+                                    // The terminal container already paints the default
+                                    // background; blank cells need no individual quad.
+                                    if bg != colors.background {
+                                        window.paint_quad(fill(
+                                            Bounds::new(origin, size(width, lh)),
+                                            rgb(bg),
+                                        ));
+                                    }
                                     if !cell.text.is_empty() {
                                         let mut f = paint_font.clone();
                                         if cell.bold {

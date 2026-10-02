@@ -142,3 +142,11 @@ Before adding a crate, inspect current GPUI and GPUI Kit documentation, compatib
 
 ## Acceptance principles
 A milestone is complete only when its behavior is implemented and checks are recorded. Compilation is not proof of visual layout, drag/drop, Keychain, host-key, or real remote-provider behavior. Use manual verification notes for OS/UI integration and provider-backed checks where available. Do not add tests unless asked by the user; if the repo's existing workflow already requires tests or a milestone calls for checks, follow that project's instructions and distinguish added tests from executed existing checks.
+
+## Local process usage monitor
+
+The status bar shows Excavator's process CPU and resident-memory usage, sampled
+asynchronously every two seconds. Clicking it opens a compact graph popup and
+starts bounded, in-memory history collection; closing pauses history collection.
+CPU uses 100% per fully occupied core. Memory covers this process, excluding
+terminal subprocesses. No samples are persisted or transmitted.

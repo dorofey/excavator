@@ -189,7 +189,10 @@ with a visible stale/error notice. Selection survives replacement by location.
 The cache is bounded to 64 listings / 50,000 entries, skips listings over
 10,000 entries, and clears after operation completion or connection changes.
 Generation and cache-epoch checks prevent obsolete results from repopulating it.
-Build passed; live SFTP Back/Forward latency and failure acceptance are pending.
+Build passed; user confirms SFTP caching works (2026-10-02).
+Refresh-failure recovery is user-verified: cached rows remained visible with
+a timeout/retry notice while offline, and refresh succeeded after reconnecting
+Wi-Fi (2026-10-02).
 
 Directory loading and SWR progress use a spinner in a reserved path-bar slot
 beside Edit Path. Removed loading/refreshing text rows to keep listing geometry
@@ -207,7 +210,8 @@ after moving a terminal tab remains unverified.
 Operation review now uses a centered confirmation modal with a dimmed backdrop,
 source/destination details, explicit confirm/cancel buttons and Enter/Esc.
 Underlying pane commands are blocked until review closes; validation errors
-stay inside the modal. Bundle build passed; native modal interaction is pending.
+stay inside the modal. Bundle build passed; user reports the modal works
+properly (2026-10-02).
 
 2026-10-02 confirmation audit: transfer conflicts now automatically open a
 centered decision modal with source/destination, Keep both, Skip, Cancel job and
@@ -236,8 +240,27 @@ Sparkle-enabled app. Source commit: 5f116fe.
 - [x] Publish 0.2.1 with the local Trash/Vim fix and signed ZIP/delta archives.
 - [x] Exercise native update detection from the running 0.2.0 app; Sparkle showed 0.2.1 and its changelog.
 - [x] Exercise download, Install and Relaunch; the relaunched app's Check for Updates reported “Excavator 0.2.1 is currently the newest version available.”
-- [ ] Verify the corrected local Trash confirmation and a disposable-file Trash round trip. Native automation timed out after dismissing the up-to-date alert, so this interaction is not claimed.
+- [x] Verify the corrected local Move to Trash flow in 0.2.1; user confirms it works (2026-10-02).
+- [x] Verify restoring a trashed item from macOS Trash; user confirms recovery works (2026-10-02).
 
 Source release commit: 476b690. Published release:
 https://github.com/dorofey/excavator/releases/tag/v0.2.1. Signing remains ad hoc;
 Developer ID and notarization are still pending.
+
+- [x] Verify SFTP caching in normal use; user confirms it works (2026-10-02).
+- [x] Verify operation modal flow in normal use; user reports it works properly (2026-10-02).
+- [x] Verify SFTP refresh-failure recovery: user screenshot shows retained cached rows and a timeout/retry notice; user confirms refresh works after reconnecting Wi-Fi (2026-10-02).
+
+## 12. Local process usage monitor
+- [x] Show process CPU and resident RAM in the status bar with asynchronous two-second sampling.
+- [x] Add a click-to-open graph popup and command-palette entry; bound in-memory history to 120 samples and pause collection on popup close.
+- [ ] Verify rendered popup positioning, changing metrics/graphs, keyboard dismissal, and pause/resume. Bundle build passed; native UI automation failed with “Sky Computer Use native pipe startup failed.”
+
+2026-10-02 CPU/split regression correction: usage sampling now updates an
+independent child view, avoiding full-workspace redraws; closed graphs allocate
+no history vectors and unchanged displayed metrics do not redraw. Terminal
+polling checks revision before cloning, painting shares an Arc snapshot, and
+default cell backgrounds avoid individual quads. Worker/cancellation polling
+is reduced. Down-split panels use bounded, clipped contents to prevent intrinsic
+listing/terminal height pushing the lower pane outside the viewport. Integrated
+cargo check passed; native split behavior and CPU improvement remain unverified.

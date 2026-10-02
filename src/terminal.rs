@@ -133,8 +133,15 @@ impl Session {
             stop,
         })
     }
+    /// Read a complete snapshot for diagnostics and explicit callers.
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> Option<Snapshot> {
-        self.snapshot.try_lock().ok().map(|s| s.clone())
+        self.snapshot_since(None)
+    }
+    /// Clone the cell grid only after output or terminal state actually changes.
+    pub fn snapshot_since(&self, revision: Option<u64>) -> Option<Snapshot> {
+        let state = self.snapshot.try_lock().ok()?;
+        (revision != Some(state.revision)).then(|| state.clone())
     }
     pub fn input(&self, bytes: &[u8]) -> Result<(), String> {
         if bytes.len() > 65536 {
@@ -304,7 +311,7 @@ fn run(
                 break;
             }
             drop(finished);
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(100));
         }
     });
     let result = (|| {
@@ -347,7 +354,7 @@ fn run(
             if stop.load(Ordering::Acquire) {
                 break;
             }
-            match controls.recv_timeout(Duration::from_millis(8)) {
+            match controls.recv_timeout(Duration::from_millis(30)) {
                 Ok(Control::Input(bytes)) => {
                     parser.screen_mut().set_scrollback(0);
                     writer

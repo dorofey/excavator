@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.2 — 2026-10-02
+
+### Added
+- CPU and resident RAM in the status bar, with a click-to-open graph popup and command-palette access. Graphs collect every two seconds while open and keep at most 120 samples in memory.
+
+### Fixed
+- Bound split-panel contents to prevent the lower pane being pushed out of view.
+- Isolate usage redraws from the file-browser workspace.
+- Avoid idle terminal grid copies, share paint snapshots, skip default cell backgrounds, and reduce polling.
+
+### Verification
+- User confirmed Trash/restoration, SFTP caching/failure recovery, tab dragging and modal interaction.
+- Build checks pass; the new split correction and CPU improvements still require live acceptance. This remains an ad hoc signed, non-notarized prerelease.
+
 ## 0.2.1 — 2026-10-02
 
 ### Fixed

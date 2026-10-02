@@ -12,6 +12,7 @@ mod terminal;
 mod terminal_commands;
 use terminal::TerminalView;
 mod settings;
+mod usage;
 use crate::appearance::Tokens;
 use crate::persistence::{AppearanceMode, AppearanceSettings, DarkTheme, LightTheme, RowDensity};
 use layout::{Axis, Layout, PaneStore};
@@ -244,6 +245,7 @@ impl Pane {
 #[derive(Clone, Copy)]
 enum Command {
     CheckUpdates,
+    Usage,
     Shortcuts,
     ToggleVim,
     Switch,
@@ -308,6 +310,7 @@ enum Command {
 const INDENT: f32 = 16.;
 const COMMANDS: &[(&str, &str, Command)] = &[
     ("Check for updates", "", Command::CheckUpdates),
+    ("Show CPU and memory graphs", "", Command::Usage),
     ("Keyboard shortcuts", "⌘?", Command::Shortcuts),
     ("Toggle Vim mode", "", Command::ToggleVim),
     ("Settings: Appearance", "⌘,", Command::Settings),
@@ -507,6 +510,7 @@ const COMMANDS: &[(&str, &str, Command)] = &[
 ];
 pub struct Workspace {
     vim: vim::VimState,
+    usage: Entity<usage::UsageMonitor>,
     shortcuts_open: bool,
     shortcuts_focus: FocusHandle,
     shortcuts_previous_focus: Option<FocusHandle>,
@@ -819,6 +823,7 @@ impl Workspace {
         });
         let mut workspace = Self {
             vim: vim::VimState::default(),
+            usage: cx.new(|cx| usage::UsageMonitor::new(colors, cx)),
             panes,
             colors,
             settings_open: false,
@@ -1186,6 +1191,10 @@ impl Workspace {
                 self.persist(cx);
             }
             Command::Shortcuts => unreachable!(),
+            Command::Usage => {
+                self.settings_open = false;
+                self.toggle_usage(window, cx);
+            },
             Command::CheckUpdates => {
                 if let Err(error) = crate::updater::check_for_updates() { self.notice = Some(error); cx.notify(); }
             },
@@ -2536,6 +2545,7 @@ impl Render for Workspace {
                     "Hidden off"
                 })
                 .child(format!("{} jobs", self.jobs.len()))
+                .child(self.status_usage(cx))
                 .when(self.preferences.vim_mode && tab.terminal.is_none(), |bar| {
                     bar.child(div().text_color(rgb(theme.accent)).child(self.vim_status()))
                 })

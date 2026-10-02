@@ -354,3 +354,11 @@ To prepare the next release:
 The signing tool requires the original Keychain key. Sparkle downloads are
 pinned by version and SHA256 in `scripts/fetch-sparkle.sh`. Framework licensing
 and integration details: https://sparkle-project.org/ (MIT).
+
+## CPU and memory
+
+Click the CPU/RAM figures in the status bar to open live graphs. Figures refresh
+every two seconds; history collects while the popup is open and pauses when it
+closes. History stays in memory and is bounded to the most recent 120 samples.
+CPU 100% means one fully used core; memory is resident RAM for Excavator itself,
+excluding terminal subprocesses. No usage data is saved or sent anywhere.

@@ -388,17 +388,30 @@ impl Workspace {
                     Axis::Right => h_resizable(("pane-split", *id)),
                     Axis::Down => v_resizable(("pane-split", *id)),
                 };
+                // Keep listings and terminal grids inside the size assigned by
+                // the splitter. Their intrinsic height must not grow a vertical
+                // panel (and push its sibling below the viewport).
                 group
                     .with_state(state)
                     .child(
                         resizable_panel()
+                            .min_w_0()
+                            .min_h_0()
                             .size_range(px(140.)..px(10000.))
-                            .child(self.render_layout(&children[0], window, cx)),
+                            .child(
+                                div().absolute().inset_0().overflow_hidden()
+                                    .child(self.render_layout(&children[0], window, cx)),
+                            ),
                     )
                     .child(
                         resizable_panel()
+                            .min_w_0()
+                            .min_h_0()
                             .size_range(px(140.)..px(10000.))
-                            .child(self.render_layout(&children[1], window, cx)),
+                            .child(
+                                div().absolute().inset_0().overflow_hidden()
+                                    .child(self.render_layout(&children[1], window, cx)),
+                            ),
                     )
                     .into_any_element()
             }

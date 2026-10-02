@@ -49,6 +49,7 @@ impl Workspace {
                 command,
                 Command::EditPath
                     | Command::Shortcuts
+                    | Command::Usage
                     | Command::Terminal
                     | Command::FocusTerminal
                     | Command::NewTerminal
