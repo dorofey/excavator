@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 — 2026-10-02
+
+### Fixed
+- Vim `dd` now reviews moving local files to macOS Trash instead of requesting unsupported permanent deletion. Remote files retain explicit permanent-deletion confirmation.
+- Local delete requests use Trash consistently, with accurate confirmation text.
+
+### Verification
+- Tab dragging reported working by the user.
+- Update installation/relaunch and the corrected Trash interaction are being checked; this remains an ad hoc signed, non-notarized prerelease.
+
 ## 0.2.0 — 2026-10-02
 
 ### Added

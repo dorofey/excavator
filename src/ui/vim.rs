@@ -32,7 +32,7 @@ impl Workspace {
             ),
             ("Split below / right", "Ctrl+W s / v"),
             ("Close split", "Ctrl+W c"),
-            ("Review copy / delete", "yy / dd"),
+            ("Review copy / Trash (remote: delete)", "yy / dd"),
             ("Rename / refresh / help", ":rename / :refresh / :help"),
             ("Shortcut help", "?"),
         ]
@@ -216,7 +216,7 @@ impl Workspace {
                 }
                 ("d", "d") => {
                     self.vim_operation_selection(count, cx);
-                    self.command(Command::Operation(Operation::Delete), window, cx);
+                    self.command(Command::Operation(Operation::Trash), window, cx);
                 }
                 ("^w", "s") => self.command(Command::Split(Axis::Down), window, cx),
                 ("^w", "v") => self.command(Command::Split(Axis::Right), window, cx),

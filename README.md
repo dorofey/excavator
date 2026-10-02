@@ -218,7 +218,7 @@ their usual keys. The command palette also offers **Toggle Vim mode**.
 | `gt` / `gT` | Next/previous tab |
 | `Ctrl+w` then `h/j/k/l` | Focus a pane left/down/up/right |
 | `Ctrl+w` then `s/v/c` | Split below/right, close split |
-| `yy` / `dd` | Review copy to another pane / permanent delete confirmation |
+| `yy` / `dd` | Review copy to another pane / move local items to Trash (remote: permanent deletion) |
 | `:rename`, `:refresh`, `:help` | Rename dialog, refresh listing, shortcut help |
 | `?` | Shortcut help |
 

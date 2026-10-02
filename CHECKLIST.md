@@ -201,7 +201,8 @@ or dropped onto a pane/tab strip to append. Existing terminal entities and tab
 state move intact; asynchronous listing/tree responses locate the current pane
 by stable tab ID. Moving the last tab collapses an extra split or leaves a fresh
 file tab on a protected original side. Command palette includes Move tab to next
-pane. Build passed; native pointer drag/session continuity acceptance is pending.
+pane. Build passed; the user reports tab dragging works. Terminal-session continuity
+after moving a terminal tab remains unverified.
 
 Operation review now uses a centered confirmation modal with a dimmed backdrop,
 source/destination details, explicit confirm/cancel buttons and Enter/Esc.
@@ -227,3 +228,6 @@ Optimized build and deep bundle-signature verification passed. Signed update
 archive and SHA256 checksum uploaded. Native download/install/relaunch remains
 unverified; this first release cannot establish an upgrade from an older
 Sparkle-enabled app. Source commit: 5f116fe.
+
+- [x] Verify tab dragging in normal use; user reports it works (2026-10-02).
+- [ ] Verify terminal-session continuity after dragging a terminal tab between panes/splits.

@@ -189,12 +189,12 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let operation =
-            if operation == Operation::Trash && !self.panes[self.active].tab().path.is_local() {
-                Operation::Delete
-            } else {
-                operation
-            };
+        let local = self.panes[self.active].tab().path.is_local();
+        let operation = match (operation, local) {
+            (Operation::Delete, true) => Operation::Trash,
+            (Operation::Trash, false) => Operation::Delete,
+            _ => operation,
+        };
         if operation == Operation::Move
             && (!self.panes[self.active].tab().path.is_local()
                 || !self.panes[self.transfer_target()].tab().path.is_local())
@@ -364,7 +364,7 @@ impl Workspace {
                 }
                 if plan.operation==Operation::Delete{paths.push("PERMANENT remote deletion. Regular files or empty directories only; no Trash or automatic undo. S3 deletes the current object and can create a delete marker in a versioned bucket.".into());}
                 if plan.operation == Operation::Trash {
-                    paths.push("Local destination: macOS Trash. Remote deletion is permanent and requires confirmation.".into());
+                    paths.push("Items will be moved to macOS Trash. You can restore them from Trash.".into());
                 }
                 if plan.operation == Operation::Move {
                     paths.push("Sources are removed only after the destination is verified.".into());
