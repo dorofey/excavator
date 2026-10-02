@@ -7,8 +7,9 @@ archive="dist/updates/Excavator-$version-macos-arm64.zip"
 mkdir -p dist/updates
 if [ -f appcast.xml ]; then cp appcast.xml dist/updates/appcast.xml; fi
 ditto -c -k --sequesterRsrc --keepParent dist/Excavator.app "$archive"
+cp CHANGELOG.md "${archive%.zip}.md"
 sparkle=$(bash scripts/fetch-sparkle.sh)
-"$sparkle/bin/generate_appcast" --account excavator --download-url-prefix "https://github.com/dorofey/excavator/releases/download/v$version/" dist/updates
+"$sparkle/bin/generate_appcast" --embed-release-notes --account excavator --download-url-prefix "https://github.com/dorofey/excavator/releases/download/v$version/" dist/updates
 cp dist/updates/appcast.xml appcast.xml
-shasum -a 256 "$archive" > "$archive.sha256"
+(cd dist/updates && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 printf 'Release archive: %s\n' "$archive"

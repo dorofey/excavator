@@ -221,3 +221,9 @@ in Keychain; only its public key is committed. In-app Check for Updates is
 available from the app menu and palette. Update-enabled bundles require macOS
 12. Developer ID/notarization, native install/relaunch and release-readiness
 acceptance gates remain unchecked.
+
+0.2.0 prerelease published at https://github.com/dorofey/excavator/releases/tag/v0.2.0.
+Optimized build and deep bundle-signature verification passed. Signed update
+archive and SHA256 checksum uploaded. Native download/install/relaunch remains
+unverified; this first release cannot establish an upgrade from an older
+Sparkle-enabled app. Source commit: 5f116fe.
