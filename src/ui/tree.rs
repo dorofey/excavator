@@ -19,7 +19,14 @@ impl TreeState {
         self.expanded.contains(location)
     }
     pub fn is_loading(&self, location: &Location) -> bool {
-        matches!(self.children.get(location), Some(Children::Loading))
+        self.cancels.contains_key(location)
+    }
+    pub fn cancel_pending(&mut self) {
+        for (_, token) in self.cancels.drain() {
+            token.cancel();
+        }
+        self.children
+            .retain(|_, children| matches!(children, Children::Loaded(_)));
     }
     /// Cancels pending loads and drops loaded children; expansion choices remain.
     pub fn reset_children(&mut self) {
@@ -39,7 +46,11 @@ impl TreeState {
         }
         let token = CancellationToken::new();
         self.expanded.insert(location.clone());
-        self.children.insert(location.clone(), Children::Loading);
+        // Retain visible children during refresh so another folder's response
+        // cannot discard their selection while this request is still pending.
+        if !matches!(self.children.get(location), Some(Children::Loaded(_))) {
+            self.children.insert(location.clone(), Children::Loading);
+        }
         self.cancels.insert(location.clone(), token.clone());
         token
     }
@@ -123,6 +134,7 @@ impl Tab {
             .collect::<BTreeSet<_>>();
         let anchor = location_at(self.anchor);
         let cursor = location_at(self.selection_cursor);
+        let old_cursor = self.selection_cursor;
         fn push(
             entries: &[Entry],
             depth: usize,
@@ -144,6 +156,24 @@ impl Tab {
         let mut rows = Vec::with_capacity(self.root_entries.len());
         let mut depths = Vec::with_capacity(self.root_entries.len());
         push(&self.root_entries, 0, &self.tree, &mut rows, &mut depths);
+        let row_by_location = rows
+            .iter()
+            .enumerate()
+            .map(|(row, entry)| (entry.location.clone(), row))
+            .collect::<HashMap<_, _>>();
+        let nearest = old_cursor.and_then(|cursor| {
+            self.entries
+                .iter()
+                .enumerate()
+                .filter_map(|(old_row, entry)| {
+                    row_by_location
+                        .get(&entry.location)
+                        .map(|row| ((old_row.abs_diff(cursor), old_row < cursor), *row))
+                })
+                .min_by_key(|(distance, _)| *distance)
+                .map(|(_, row)| row)
+                .or_else(|| (!rows.is_empty()).then(|| cursor.min(rows.len() - 1)))
+        });
         self.entries = rows;
         self.depths = depths;
         let find = |location: &Option<Location>| {
@@ -160,6 +190,17 @@ impl Tab {
             .filter(|(_, entry)| selected.contains(&entry.location))
             .map(|(row, _)| row)
             .collect();
+        if self.selection_cursor.is_none() {
+            self.selection_cursor = self.selected.iter().next().copied().or(nearest);
+            if self.selected.is_empty()
+                && let Some(row) = self.selection_cursor
+            {
+                self.selected.insert(row);
+            }
+        }
+        if self.anchor.is_none() {
+            self.anchor = self.selection_cursor;
+        }
     }
 }
 
@@ -208,7 +249,14 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(i) = this.panes.ids().into_iter().find(|pane| this.panes[*pane].tabs.iter().any(|tab| tab.id == tab_id)) else { return; };
+                let Some(i) = this
+                    .panes
+                    .ids()
+                    .into_iter()
+                    .find(|pane| this.panes[*pane].tabs.iter().any(|tab| tab.id == tab_id))
+                else {
+                    return;
+                };
                 let Some(pane) = this.panes.get_mut(i) else {
                     return;
                 };

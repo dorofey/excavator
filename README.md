@@ -278,6 +278,13 @@ validation, and failures without touching live Application Support.
 
 ### Integrated terminal
 
+Drop files from a file pane onto a terminal to insert their shell-quoted full
+paths at the cursor. Multiple files become separate arguments, followed by a
+space; the drop does not send Enter. Local terminals accept local files, and
+SSH terminals accept files from the same SFTP connection. Finder drops also
+insert paths into local terminals. Unsupported sources and filenames containing
+control characters show a notice.
+
 Terminals live in pane tabs. Cmd+Option+T creates a terminal tab in the active
 pane; Ctrl+backtick switches between its file and terminal tabs without stopping
 the shell. Cmd+Option+J focuses a terminal and Cmd+Option+F returns to files.
@@ -293,8 +300,11 @@ SSH handles its own authentication and `known_hosts`; Excavator's provider
 password and trust store are not reused. FTPS and S3 have no shell.
 
 ANSI screen rendering, resize, shell control keys, Unicode input, clipboard
-paste and scrollback are supported. Output selection/copy and mouse reporting
-are not implemented. Sessions are not saved. File operations require file tabs.
+paste and scrollback are supported. Drag across output to select text and press
+Cmd+C to copy; Ctrl+C still interrupts the shell. Typing, scrolling, or resizing
+clears selection. Selected output stays stable while copying. Copying across
+visual rows inserts newlines, including at wrapped lines. Mouse reporting
+is not implemented. Sessions are not saved. File operations require file tabs.
 
 Run real PTY checks with `cargo run --locked --example verify_terminal`.
 `verify_terminal_ui` opens isolated production Workspace controls with independent
@@ -326,7 +336,7 @@ protocol skips, duplicates, malformed data and credential exclusion.
 ## Releases and updates
 
 See [CHANGELOG.md](CHANGELOG.md) for user-facing changes. The Apple Silicon
-0.2.0 prerelease is ad hoc signed and not notarized. Release builds include
+prereleases are ad hoc signed and not notarized. Release builds include
 Sparkle 2.10.0 for **Excavator → Check for Updates…** and the command palette.
 Sparkle provides download, signature verification, installation and relaunch.
 It asks about automatic update checks. Debug builds omit Sparkle unless

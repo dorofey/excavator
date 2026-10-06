@@ -59,11 +59,15 @@ independently of the provider's Keychain password and host-key store. Failure
 to change remote directory ends the session; FTPS and S3 have no shell.
 
 Shell input, ANSI colors, cursor movement, alternate screen, bracketed paste,
-scrollback and resize are supported. Terminal mouse reporting and output text
-selection/copy are follow-up work. Sessions and output are never persisted.
-File operations and drops require visible file tabs; they never use a terminal
-launch directory as an implicit destination. Saved left/right locations come
-from file tabs.
+scrollback, resize, mouse-drag output selection and Cmd+C copy are supported.
+Ctrl+C still sends a shell interrupt. Selection holds a stable output snapshot
+until typing, scrolling, resizing or a click clears it. Copy joins visual rows
+with newlines. Terminal mouse reporting is follow-up work. Sessions and output are never persisted.
+File transfers require visible file tabs; they never use a terminal launch
+directory as an implicit destination. Dropping files onto a terminal inserts
+shell-quoted absolute paths at its cursor without sending Enter. Local terminals
+accept local paths; SSH terminals accept paths from the same SFTP connection.
+Saved left/right locations come from file tabs.
 
 ## MVP definition
 MVP is local filesystem only. It must launch into two useful panes, navigate folders, show metadata, select files, open folders, create folders, rename, copy, move, and delete with confirmation; support tabs/history, favorites, keyboard commands, and a visible transfer queue. Treat cross-volume move as copy then delete only after a verified copy; surface partial failures and offer recovery information. SFTP/FTP/S3 are later phases.

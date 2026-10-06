@@ -454,7 +454,7 @@ const COMMANDS: &[(&str, &str, Command)] = &[
         "⌘Backspace",
         Command::Operation(Operation::Trash),
     ),
-    ("Toggle transfer queue", "⌘J", Command::Transfers),
+    ("Toggle log", "⌘J", Command::Transfers),
     ("Toggle terminal", "⌃`", Command::Terminal),
     ("Focus terminal", "⌘⌥J", Command::FocusTerminal),
     (
@@ -596,7 +596,11 @@ impl Workspace {
             KeyBinding::new("?", ToggleShortcuts, Some("Listing && !Vim")),
             KeyBinding::new("shift-/", ToggleShortcuts, Some("Listing && !Vim")),
             KeyBinding::new("tab", SwitchPane, Some("Workspace && !Terminal && !Vim")),
-            KeyBinding::new("shift-tab", PreviousPane, Some("Workspace && !Terminal && !VimInput")),
+            KeyBinding::new(
+                "shift-tab",
+                PreviousPane,
+                Some("Workspace && !Terminal && !VimInput"),
+            ),
             KeyBinding::new("cmd-alt-right", SplitRight, Some("Workspace")),
             KeyBinding::new("cmd-alt-shift-right", SplitTerminalRight, Some("Workspace")),
             KeyBinding::new("cmd-alt-shift-down", SplitTerminalDown, Some("Workspace")),
@@ -636,11 +640,23 @@ impl Workspace {
             KeyBinding::new("cmd-o", ChooseFolder, Some("Workspace")),
             KeyBinding::new("cmd-shift-.", ToggleHidden, Some("Workspace")),
             KeyBinding::new("cmd-shift-p", TogglePalette, Some("Workspace")),
-            KeyBinding::new("escape", Escape, Some("Workspace && !Terminal && !Vim && !TransferConflict")),
+            KeyBinding::new(
+                "escape",
+                Escape,
+                Some("Workspace && !Terminal && !Vim && !TransferConflict"),
+            ),
             KeyBinding::new("cmd-d", AddFavorite, Some("Workspace")),
             KeyBinding::new("cmd-shift-d", RemoveFavorite, Some("Workspace")),
-            KeyBinding::new("shift-down", ExtendSelectionNext, Some("Listing && !VimInput")),
-            KeyBinding::new("shift-up", ExtendSelectionPrevious, Some("Listing && !VimInput")),
+            KeyBinding::new(
+                "shift-down",
+                ExtendSelectionNext,
+                Some("Listing && !VimInput"),
+            ),
+            KeyBinding::new(
+                "shift-up",
+                ExtendSelectionPrevious,
+                Some("Listing && !VimInput"),
+            ),
             KeyBinding::new(
                 "ctrl-alt-right",
                 GrowLeftPane,
@@ -954,7 +970,9 @@ impl Workspace {
         let registry = self.registry.clone();
         let show_hidden = self.preferences.show_hidden;
         let path = self.panes[i].tab().path.clone();
-        let cached = self.sftp_listing_cache.iter()
+        let cached = self
+            .sftp_listing_cache
+            .iter()
             .find(|(location, hidden, _)| location == &path && *hidden == show_hidden)
             .map(|(_, _, entries)| entries.clone());
         let cache_epoch = self.listing_cache_epoch;
@@ -964,14 +982,9 @@ impl Workspace {
         tab.generation += 1;
         tab.loading = true;
         tab.error = None;
-        tab.entries.clear();
-        tab.depths.clear();
-        tab.root_entries.clear();
-        tab.tree.reset_children();
-        tab.selected.clear();
-        tab.anchor = None;
-        tab.selection_cursor = None;
-        tab.cached_listing = cached.is_some();
+        // Keep rows and their selection until the replacement listing arrives.
+        tab.tree.cancel_pending();
+        tab.cached_listing = cached.is_some() || !tab.entries.is_empty();
         if let Some(entries) = cached {
             tab.root_entries = entries;
             tab.sort_entries();
@@ -987,7 +1000,14 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(i) = this.panes.ids().into_iter().find(|pane| this.panes[*pane].tabs.iter().any(|tab| tab.id == id)) else { return; };
+                let Some(i) = this
+                    .panes
+                    .ids()
+                    .into_iter()
+                    .find(|pane| this.panes[*pane].tabs.iter().any(|tab| tab.id == id))
+                else {
+                    return;
+                };
                 let Some(pane) = this.panes.get_mut(i) else {
                     return;
                 };
@@ -1002,9 +1022,12 @@ impl Workspace {
                 let mut reexpand = vec![];
                 match result {
                     Ok(entries) => {
-                        let cache_entries = if matches!(path, Location::Sftp { .. }) && entries.len() <= 10_000 {
-                            Some(entries.clone())
-                        } else { None };
+                        let cache_entries =
+                            if matches!(path, Location::Sftp { .. }) && entries.len() <= 10_000 {
+                                Some(entries.clone())
+                            } else {
+                                None
+                            };
                         tab.root_entries = entries;
                         tab.sort_entries();
                         tab.cached_listing = false;
@@ -1012,9 +1035,22 @@ impl Workspace {
                         reexpand = std::mem::take(&mut tab.tree.expanded).into_iter().collect();
                         if cache_epoch == this.listing_cache_epoch {
                             if let Some(entries) = cache_entries {
-                                this.sftp_listing_cache.retain(|(location, hidden, _)| location != &path || *hidden != show_hidden);
-                                this.sftp_listing_cache.push_back((path.clone(), show_hidden, entries));
-                                while this.sftp_listing_cache.len() > 64 || this.sftp_listing_cache.iter().map(|(_, _, entries)| entries.len()).sum::<usize>() > 50_000 {
+                                this.sftp_listing_cache.retain(|(location, hidden, _)| {
+                                    location != &path || *hidden != show_hidden
+                                });
+                                this.sftp_listing_cache.push_back((
+                                    path.clone(),
+                                    show_hidden,
+                                    entries,
+                                ));
+                                while this.sftp_listing_cache.len() > 64
+                                    || this
+                                        .sftp_listing_cache
+                                        .iter()
+                                        .map(|(_, _, entries)| entries.len())
+                                        .sum::<usize>()
+                                        > 50_000
+                                {
                                     this.sftp_listing_cache.pop_front();
                                 }
                             }
@@ -1053,6 +1089,12 @@ impl Workspace {
         }
         if tab.path != path {
             tab.tree.clear();
+            tab.entries.clear();
+            tab.depths.clear();
+            tab.root_entries.clear();
+            tab.selected.clear();
+            tab.anchor = None;
+            tab.selection_cursor = None;
             self.vim = vim::VimState::default();
         }
         tab.path = path;
@@ -1145,14 +1187,25 @@ impl Workspace {
             .collect()
     }
     fn command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
-        if self.operation_dialog.is_some() { return; }
+        if self.operation_dialog.is_some() {
+            return;
+        }
         if self.connection_screen.is_some()
-            && !matches!(command,
-                Command::SaveConnection | Command::TestDraftConnection | Command::ConfirmConnection
-                | Command::ConnectionProtocol(_) | Command::SavedConnection(_, _)
-                | Command::Connections | Command::NewConnection | Command::ImportForkLift
-                | Command::TestConnection | Command::EditConnection | Command::RemoveConnection
-                | Command::ResetHost)
+            && !matches!(
+                command,
+                Command::SaveConnection
+                    | Command::TestDraftConnection
+                    | Command::ConfirmConnection
+                    | Command::ConnectionProtocol(_)
+                    | Command::SavedConnection(_, _)
+                    | Command::Connections
+                    | Command::NewConnection
+                    | Command::ImportForkLift
+                    | Command::TestConnection
+                    | Command::EditConnection
+                    | Command::RemoveConnection
+                    | Command::ResetHost
+            )
         {
             return;
         }
@@ -1194,10 +1247,13 @@ impl Workspace {
             Command::Usage => {
                 self.settings_open = false;
                 self.toggle_usage(window, cx);
-            },
+            }
             Command::CheckUpdates => {
-                if let Err(error) = crate::updater::check_for_updates() { self.notice = Some(error); cx.notify(); }
-            },
+                if let Err(error) = crate::updater::check_for_updates() {
+                    self.notice = Some(error);
+                    cx.notify();
+                }
+            }
             Command::Settings => self.open_settings(window, cx),
             Command::SidebarUp => self.move_sidebar_cursor(-1, cx),
             Command::SidebarDown => self.move_sidebar_cursor(1, cx),
@@ -1349,7 +1405,11 @@ impl Workspace {
                 let position = leaves.iter().position(|pane| *pane == i).unwrap_or(0);
                 let destination = leaves[(position + 1) % leaves.len()];
                 let tab = self.panes[i].tab();
-                let drag = TabDrag { source_pane: i, tab_id: tab.id, label: tab.path.label() };
+                let drag = TabDrag {
+                    source_pane: i,
+                    tab_id: tab.id,
+                    label: tab.path.label(),
+                };
                 self.move_dragged_tab(&drag, destination, None, window, cx);
             }
             Command::MoveTabLeft | Command::MoveTabRight => {
@@ -1519,25 +1579,40 @@ impl Workspace {
             }
         }
     }
-    fn open_linked_folder(&mut self, pane: usize, location: Location, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_linked_folder(
+        &mut self,
+        pane: usize,
+        location: Location,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tab = self.panes[pane].tab();
         let id = tab.id;
         let generation = tab.generation;
         let cancel = tab.cancel.clone();
         let registry = self.registry.clone();
-        let task = cx.background_executor().spawn(async move {
-            registry.linked_directory(&location, &cancel)
-        });
+        let task = cx
+            .background_executor()
+            .spawn(async move { registry.linked_directory(&location, &cancel) });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if !this.panes.contains(pane) || this.panes[pane].tab().id != id || this.panes[pane].tab().generation != generation { return; }
+                if !this.panes.contains(pane)
+                    || this.panes[pane].tab().id != id
+                    || this.panes[pane].tab().generation != generation
+                {
+                    return;
+                }
                 match result {
                     Ok(target) => this.navigate(pane, target, true, window, cx),
-                    Err(error) => { this.notice = Some(error.to_string()); cx.notify(); }
+                    Err(error) => {
+                        this.notice = Some(error.to_string());
+                        cx.notify();
+                    }
                 }
             });
-        }).detach();
+        })
+        .detach();
     }
     fn open_file(&mut self, location: Location, cx: &mut Context<Self>) {
         if !location.is_local() {
@@ -1561,19 +1636,49 @@ impl Workspace {
         .detach();
     }
     /// One pane's tab strip, rendered in the window's top tab row.
-    fn move_dragged_tab(&mut self, drag: &TabDrag, destination: usize, before: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+    fn move_dragged_tab(
+        &mut self,
+        drag: &TabDrag,
+        destination: usize,
+        before: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let source = drag.source_pane;
-        if self.connection_screen.is_some() || !self.panes.contains(source) || !self.panes.contains(destination) { return; }
-        let Some(index) = self.panes[source].tabs.iter().position(|tab| tab.id == drag.tab_id) else { return; };
-        if before == Some(drag.tab_id) { return; }
+        if self.connection_screen.is_some()
+            || !self.panes.contains(source)
+            || !self.panes.contains(destination)
+        {
+            return;
+        }
+        let Some(index) = self.panes[source]
+            .tabs
+            .iter()
+            .position(|tab| tab.id == drag.tab_id)
+        else {
+            return;
+        };
+        if before == Some(drag.tab_id) {
+            return;
+        }
         let path = self.panes[source].tabs[index].path.clone();
         let active_id = self.panes[source].tab().id;
         let tab = self.panes[source].tabs.remove(index);
         if source != destination {
-            self.panes[source].recent_file_tab = self.panes[source].recent_file_tab.filter(|id| *id != drag.tab_id);
-            self.panes[source].recent_terminal_tab = self.panes[source].recent_terminal_tab.filter(|id| *id != drag.tab_id);
+            self.panes[source].recent_file_tab = self.panes[source]
+                .recent_file_tab
+                .filter(|id| *id != drag.tab_id);
+            self.panes[source].recent_terminal_tab = self.panes[source]
+                .recent_terminal_tab
+                .filter(|id| *id != drag.tab_id);
         }
-        let insertion = before.and_then(|id| self.panes[destination].tabs.iter().position(|tab| tab.id == id))
+        let insertion = before
+            .and_then(|id| {
+                self.panes[destination]
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.id == id)
+            })
             .unwrap_or(self.panes[destination].tabs.len());
         self.panes[destination].tabs.insert(insertion, tab);
         self.panes[destination].active = insertion;
@@ -1589,10 +1694,15 @@ impl Workspace {
                     self.request_listing(source, cx);
                 }
             } else {
-                self.panes[source].active = self.panes[source].tabs.iter().position(|tab| tab.id == active_id)
+                self.panes[source].active = self.panes[source]
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.id == active_id)
                     .unwrap_or(index.min(self.panes[source].tabs.len() - 1));
             }
-            if self.panes.contains(source) { self.sync_path(source, window, cx); }
+            if self.panes.contains(source) {
+                self.sync_path(source, window, cx);
+            }
         }
         self.sync_path(destination, window, cx);
         self.activate(destination, window, cx);
@@ -1821,51 +1931,121 @@ impl Workspace {
     fn render_path_bar(&self, i: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let pane = &self.panes[i];
         let font_size = self.preferences.appearance.font_size;
-        let loading_indicator = || div().flex_none().w(px(20.)).h_full().flex().items_center().justify_center()
-            .when(pane.tab().loading, |slot| slot.child(
-                gpui_kit::component::spinner::Spinner::new().with_size(px(14.)).color(rgb(self.colors.muted).into())
-            ));
+        let loading_indicator = || {
+            div()
+                .flex_none()
+                .w(px(20.))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(pane.tab().loading, |slot| {
+                    slot.child(
+                        gpui_kit::component::spinner::Spinner::new()
+                            .with_size(px(14.))
+                            .color(rgb(self.colors.muted).into()),
+                    )
+                })
+        };
         if pane.path_input.read(cx).focus_handle(cx).is_focused(window) {
-            return div().flex().items_center().h_full()
-                .child(div().flex_1().min_w_0().child(Styled::h(Input::new(&pane.path_input), px(font_size + 16.))
-                    .px(px(10.)).py(px(4.)).text_size(px(font_size))))
-                .child(loading_indicator()).into_any_element();
+            return div()
+                .flex()
+                .items_center()
+                .h_full()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Styled::h(Input::new(&pane.path_input), px(font_size + 16.))
+                            .px(px(10.))
+                            .py(px(4.))
+                            .text_size(px(font_size)),
+                    ),
+                )
+                .child(loading_indicator())
+                .into_any_element();
         }
         let mut crumbs = vec![pane.tab().path.clone()];
         while let Some(parent) = crumbs.last().and_then(Location::parent) {
-            if crumbs.contains(&parent) { break; }
+            if crumbs.contains(&parent) {
+                break;
+            }
             crumbs.push(parent);
         }
         crumbs.reverse();
         let tab_id = pane.tab().id;
-        div().flex().items_center().h_full().gap(px(4.))
-            .child(div().id(("path-breadcrumbs", i)).flex_1().min_w_0().h_full().flex().items_center().overflow_x_scroll()
-                .children(crumbs.into_iter().enumerate().map(|(index, location)| {
-                    let mut label = location.label();
-                    if index == 0 {
-                        if let Location::Sftp { connection, .. } | Location::Ftps { connection, .. } = &location {
-                            label = self.connections.iter().find(|record| &record.id == connection)
-                                .map(|record| record.name.clone()).unwrap_or_else(|| "Remote".into());
+        div()
+            .flex()
+            .items_center()
+            .h_full()
+            .gap(px(4.))
+            .child(
+                div()
+                    .id(("path-breadcrumbs", i))
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .overflow_x_scroll()
+                    .children(crumbs.into_iter().enumerate().map(|(index, location)| {
+                        let mut label = location.label();
+                        if index == 0 {
+                            if let Location::Sftp { connection, .. }
+                            | Location::Ftps { connection, .. } = &location
+                            {
+                                label = self
+                                    .connections
+                                    .iter()
+                                    .find(|record| &record.id == connection)
+                                    .map(|record| record.name.clone())
+                                    .unwrap_or_else(|| "Remote".into());
+                            }
                         }
-                    }
-                    div().flex_none().flex().items_center().gap(px(4.))
-                        .when(index > 0, |row| row.child(Icon::new(IconName::ChevronRight).size(px(12.)).text_color(rgb(self.colors.muted))))
-                        .child(Button::new(("breadcrumb", i * 1000 + index)).ghost().compact().label(label.clone())
-                            .accessibility_label(format!("Open folder {label}"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if !this.panes.contains(i) || this.panes[i].tab().id != tab_id { return; }
-                                this.activate(i, window, cx);
-                                this.navigate(i, location.clone(), true, window, cx);
-                            })))
-                })))
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .when(index > 0, |row| {
+                                row.child(
+                                    Icon::new(IconName::ChevronRight)
+                                        .size(px(12.))
+                                        .text_color(rgb(self.colors.muted)),
+                                )
+                            })
+                            .child(
+                                Button::new(("breadcrumb", i * 1000 + index))
+                                    .ghost()
+                                    .compact()
+                                    .label(label.clone())
+                                    .accessibility_label(format!("Open folder {label}"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if !this.panes.contains(i)
+                                            || this.panes[i].tab().id != tab_id
+                                        {
+                                            return;
+                                        }
+                                        this.activate(i, window, cx);
+                                        this.navigate(i, location.clone(), true, window, cx);
+                                    })),
+                            )
+                    })),
+            )
             .child(loading_indicator())
-            .child(Button::new(("edit-pane-path", i)).ghost().compact().label("…")
-                .accessibility_label("Edit path").tooltip("Edit path · ⌘L")
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if !this.panes.contains(i) { return; }
-                    this.activate(i, window, cx);
-                    this.command(Command::EditPath, window, cx);
-                })))
+            .child(
+                Button::new(("edit-pane-path", i))
+                    .ghost()
+                    .compact()
+                    .label("…")
+                    .accessibility_label("Edit path")
+                    .tooltip("Edit path · ⌘L")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !this.panes.contains(i) {
+                            return;
+                        }
+                        this.activate(i, window, cx);
+                        this.command(Command::EditPath, window, cx);
+                    })),
+            )
             .into_any_element()
     }
     fn render_pane(&self, i: usize, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1903,10 +2083,18 @@ impl Workspace {
             .id(("listing", i))
             .track_focus(&pane.focus)
             .key_context(if self.preferences.vim_mode {
-                if self.vim_input_active() { "Listing Vim VimInput" } else { "Listing Vim" }
-            } else { "Listing" })
+                if self.vim_input_active() {
+                    "Listing Vim VimInput"
+                } else {
+                    "Listing Vim"
+                }
+            } else {
+                "Listing"
+            })
             .on_key_down(cx.listener(|this, event, window, cx| {
-                if this.vim_key(event, window, cx) { cx.stop_propagation(); }
+                if this.vim_key(event, window, cx) {
+                    cx.stop_propagation();
+                }
             }))
             .flex_1()
             .min_h_0()
@@ -1916,9 +2104,16 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| this.activate(i, window, cx)),
             );
-        if tab.cached_listing && let Some(error) = &tab.error {
-            content = content.child(div().px_3().py_1().text_color(rgb(theme.warning))
-                .child(format!("Refresh failed: {error} · ⌘R Retry")));
+        if tab.cached_listing
+            && let Some(error) = &tab.error
+        {
+            content = content.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_color(rgb(theme.warning))
+                    .child(format!("Refresh failed: {error} · ⌘R Retry")),
+            );
         }
         if tab.loading && !tab.cached_listing {
             // Keep initial loading empty; progress lives in the fixed path bar.
@@ -1987,7 +2182,10 @@ impl Workspace {
                     .gap_2()
                     .bg(rgb(if selected {
                         theme.selection
-                    } else if self.preferences.vim_mode && i == self.active && tab.selection_cursor == Some(row) {
+                    } else if self.preferences.vim_mode
+                        && i == self.active
+                        && tab.selection_cursor == Some(row)
+                    {
                         theme.hover
                     } else {
                         theme.background
@@ -2161,8 +2359,8 @@ impl Workspace {
                 pane.child(self.render_pane_tabs(i, cx))
             })
             .can_drop(move |payload, _, _| {
-                payload.is::<TabDrag>() || file_tab
-                    && (payload
+                payload.is::<TabDrag>()
+                    || (payload
                         .downcast_ref::<PaneDrag>()
                         .is_some_and(|drag| drag.source_pane != i && !drag.sources.is_empty())
                         || payload
@@ -2178,14 +2376,26 @@ impl Workspace {
             .drag_over::<TabDrag>(move |style, _, _, _| {
                 style.border_2().border_color(rgb(theme.accent))
             })
-            .on_drop(cx.listener(move |this, drag: &PaneDrag, _, cx| {
+            .on_drop(cx.listener(move |this, drag: &PaneDrag, window, cx| {
                 this.drop_copy(drag.clone(), i, pane_tab_id, cx);
+                if this.panes.contains(i)
+                    && this.panes[i].tab().id == pane_tab_id
+                    && this.panes[i].tab().terminal.is_some()
+                {
+                    this.activate(i, window, cx);
+                }
             }))
             .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
                 this.move_dragged_tab(drag, i, None, window, cx);
             }))
-            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                 this.drop_external_copy(paths.clone(), i, pane_tab_id, cx);
+                if this.panes.contains(i)
+                    && this.panes[i].tab().id == pane_tab_id
+                    && this.panes[i].tab().terminal.is_some()
+                {
+                    this.activate(i, window, cx);
+                }
             }))
             .when(file_tab, |panel| {
                 panel
@@ -2442,7 +2652,9 @@ impl Render for Workspace {
                 this.command(Command::CheckUpdates, window, cx);
             }))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
-                if matches!(this.operation_dialog, Some(OperationDialog::Conflict(..))) { return; }
+                if matches!(this.operation_dialog, Some(OperationDialog::Conflict(..))) {
+                    return;
+                }
                 this.palette = false;
                 if this.sidebar_focus.is_focused(window) {
                     this.activate(this.active, window, cx);
@@ -2583,14 +2795,14 @@ impl Render for Workspace {
                                 .selected(self.transfer_drawer)
                                 .toggled(self.transfer_drawer)
                                 .accessibility_label(format!(
-                                    "{} transfer queue, {} jobs",
+                                    "{} log, {} jobs",
                                     if self.transfer_drawer { "Hide" } else { "Show" },
                                     self.jobs.len()
                                 ))
                                 .tooltip(if self.transfer_drawer {
-                                    "Hide transfer queue · ⌘J"
+                                    "Hide log · ⌘J"
                                 } else {
-                                    "Show transfer queue · ⌘J"
+                                    "Show log · ⌘J"
                                 })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.command(Command::Transfers, window, cx)

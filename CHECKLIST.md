@@ -235,6 +235,7 @@ Sparkle-enabled app. Source commit: 5f116fe.
 
 - [x] Verify tab dragging in normal use; user reports it works (2026-10-02).
 - [ ] Verify terminal-session continuity after dragging a terminal tab between panes/splits.
+- [ ] Verify file-to-terminal drops in the rendered app: multiple files, spaces/apostrophes, insertion at the shell cursor, same-connection SFTP paths, and no execution before Enter. Path insertion is implemented; compilation and existing PTY checks passed (2026-10-05).
 
 ## 11. Release update acceptance (2026-10-02)
 - [x] Publish 0.2.1 with the local Trash/Vim fix and signed ZIP/delta archives.
@@ -270,3 +271,13 @@ the Down-split layout correction. Optimized build and deep bundle signature
 verification passed; signed ZIP and deltas uploaded. Native split/CPU acceptance
 remains pending. Source commit: b32cd36.
 https://github.com/dorofey/excavator/releases/tag/v0.2.2
+
+- [ ] Verify terminal text selection in the rendered app: forward/reverse and multirow drags, wide Unicode, scrollback, Cmd+C copy, Ctrl+C interrupt, and selection clearing on input/scroll/resize. Selection is implemented; native interaction remains pending.
+
+## 0.2.3 release preparation (2026-10-06)
+Optimized macOS bundle build, deep/strict code signature verification, compilation,
+existing PTY and transfer checks passed. Release ZIP length, SHA256 and Ed25519
+signature were verified against the committed Sparkle public key. The feed uses
+the full archive and preserves all prior release entries. Native selection/drop
+acceptance and update installation/relaunch remain pending. Signing is ad hoc;
+the bundle is not notarized.

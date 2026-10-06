@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.3 — 2026-10-06
+
+### Added
+- Drop files into the terminal to insert shell-quoted absolute paths at the cursor without executing them. SSH terminals accept paths from the same SFTP connection.
+- Drag to select terminal output and press Cmd+C to copy. Ctrl+C continues to interrupt the shell. Selected output remains stable until input, scrolling, resizing, or a click clears it. Copying visual rows inserts newlines, including at wrapped lines.
+
+### Changed
+- Rename Transfers to Log because it also contains deletion entries. Open it only on user request.
+
+### Fixed
+- Preserve selection during listing refresh and select the closest surviving file after deletion instead of jumping to the top.
+
+### Verification
+- Compilation, macOS bundle build, and existing PTY checks passed. Native selection, clipboard, and file-drop acceptance remain pending.
+- This remains an Apple Silicon prerelease, ad hoc signed and not notarized.
+
 ## 0.2.2 — 2026-10-02
 
 ### Added

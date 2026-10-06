@@ -18,6 +18,10 @@ pub(super) struct TerminalView {
     bounds: Bounds<Pixels>,
     requested_size: (u16, u16),
     font: Font,
+    cell_size: (f32, f32),
+    selection: Option<(usize, usize)>,
+    selection_snapshot: Option<Arc<Snapshot>>,
+    selecting: bool,
 }
 /// Menlo with installed Nerd Font families as glyph fallbacks, so Powerline and
 /// icon code points in prompts render instead of missing-glyph boxes.
@@ -95,7 +99,61 @@ impl TerminalView {
             bounds: Bounds::default(),
             requested_size: (14, 80),
             font: terminal_font(window),
+            cell_size: (1., 1.),
+            selection: None,
+            selection_snapshot: None,
+            selecting: false,
         }
+    }
+    fn clear_selection(&mut self) {
+        self.selection = None;
+        self.selection_snapshot = None;
+        self.selecting = false;
+    }
+    fn cell_at(&self, position: Point<Pixels>) -> Option<usize> {
+        let snapshot = self
+            .selection_snapshot
+            .as_ref()
+            .or(self.snapshot.as_ref())?;
+        let x: f32 = (position.x - self.bounds.origin.x).into();
+        let y: f32 = (position.y - self.bounds.origin.y).into();
+        let col = (x / self.cell_size.0)
+            .floor()
+            .clamp(0., snapshot.cols.saturating_sub(1) as f32) as usize;
+        let row = (y / self.cell_size.1)
+            .floor()
+            .clamp(0., snapshot.rows.saturating_sub(1) as f32) as usize;
+        Some(row * snapshot.cols as usize + col)
+    }
+    fn selected_text(&self) -> Option<String> {
+        let (anchor, head) = self.selection?;
+        let snapshot = self.selection_snapshot.as_ref()?;
+        let start = anchor.min(head);
+        let end = anchor.max(head);
+        let cols = snapshot.cols as usize;
+        let mut lines = Vec::new();
+        for row in start / cols..=end / cols {
+            let mut line = String::new();
+            for col in 0..cols {
+                let index = row * cols + col;
+                let Some(cell) = snapshot.cells.get(index) else {
+                    continue;
+                };
+                if cell.continuation {
+                    continue;
+                }
+                if index > end || index + usize::from(cell.wide) < start {
+                    continue;
+                }
+                if cell.text.is_empty() {
+                    line.push(' ');
+                } else {
+                    line.push_str(&cell.text);
+                }
+            }
+            lines.push(line.trim_end_matches(' ').to_string());
+        }
+        Some(lines.join("\n"))
     }
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
@@ -125,12 +183,27 @@ impl TerminalView {
             .unwrap_or_default()
     }
     pub(super) fn send_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.clear_selection();
+        cx.notify();
         if let Some(session) = &self.session {
             if let Err(error) = session.input(bytes) {
                 self.failure = Some(error);
                 cx.notify();
             }
         }
+    }
+    pub(super) fn insert_dropped_text(&mut self, text: &str) -> Result<(), String> {
+        self.clear_selection();
+        let session = self
+            .session
+            .as_ref()
+            .ok_or("The terminal is not available.")?;
+        let text = if self.snapshot.as_ref().is_some_and(|s| s.bracketed_paste) {
+            format!("\x1b[200~{text}\x1b[201~")
+        } else {
+            text.to_string()
+        };
+        session.input(text.as_bytes())
     }
     fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -149,6 +222,13 @@ impl TerminalView {
         let key = &event.keystroke;
         let m = key.modifiers;
         if m.platform {
+            if key.key == "c" && !m.alt {
+                if let Some(text) = self.selected_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+                cx.stop_propagation();
+                window.prevent_default();
+            }
             if key.key == "v" && !m.alt {
                 if let Some(item) = cx.read_from_clipboard() {
                     if let Some(text) = item.text() {
@@ -245,10 +325,49 @@ impl Render for TerminalView {
             .bg(rgb(colors.background))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.focus(window, cx)),
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.focus(window, cx);
+                    this.clear_selection();
+                    this.selection_snapshot = this.snapshot.clone();
+                    this.selection = this.cell_at(event.position).map(|cell| (cell, cell));
+                    this.selecting = true;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if this.selecting && event.dragging() {
+                    if let (Some((anchor, _)), Some(head)) =
+                        (this.selection, this.cell_at(event.position))
+                    {
+                        this.selection = Some((anchor, head));
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.selecting = false;
+                    if this.selection.is_some_and(|(a, b)| a == b) {
+                        this.clear_selection();
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.selecting = false;
+                    if this.selection.is_some_and(|(a, b)| a == b) {
+                        this.clear_selection();
+                    }
+                    cx.notify();
+                }),
             )
             .on_key_down(cx.listener(Self::key))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                this.clear_selection();
+                cx.notify();
                 let delta: f32 = event.delta.pixel_delta(px(this.font_size * 1.4)).y.into();
                 if let Some(session) = &this.session {
                     if let Err(error) =
@@ -287,7 +406,9 @@ impl Render for TerminalView {
                         let cols = (width / cw).floor().clamp(2., 400.) as u16;
                         entity.update(cx, |this, cx| {
                             this.bounds = bounds;
+                            this.cell_size = (cw, lh);
                             if this.requested_size != (rows, cols) {
+                                this.clear_selection();
                                 if let Some(session) = &this.session {
                                     match session.resize(rows, cols) {
                                         Ok(()) => this.requested_size = (rows, cols),
@@ -308,7 +429,12 @@ impl Render for TerminalView {
                             ElementInputHandler::new(bounds, paint_entity.clone()),
                             cx,
                         );
-                        let snapshot = paint_entity.read(cx).snapshot.clone();
+                        let view = paint_entity.read(cx);
+                        let selection = view.selection;
+                        let snapshot = view
+                            .selection_snapshot
+                            .clone()
+                            .or_else(|| view.snapshot.clone());
                         let marked = paint_entity.read(cx).marked.clone();
                         if let Some(snapshot) = &snapshot {
                             for row in 0..snapshot.rows {
@@ -344,6 +470,15 @@ impl Render for TerminalView {
                                             bg = colors.accent;
                                             fg = colors.background;
                                         }
+                                    }
+                                    let index =
+                                        row as usize * snapshot.cols as usize + col as usize;
+                                    if selection.is_some_and(|(a, b)| {
+                                        index <= a.max(b)
+                                            && index + usize::from(cell.wide) >= a.min(b)
+                                    }) {
+                                        bg = colors.accent;
+                                        fg = colors.background;
                                     }
                                     let width = if cell.wide { cw * 2. } else { cw };
                                     // The terminal container already paints the default

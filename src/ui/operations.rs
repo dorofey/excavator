@@ -64,13 +64,19 @@ impl Workspace {
     ) {
         if !self.panes.contains(destination_pane)
             || self.panes[destination_pane].tab().id != destination_tab_id
-            || self.panes[destination_pane].tab().terminal.is_some()
         {
             self.notice = Some("The destination pane changed during the drag. Try again.".into());
             cx.notify();
             return;
         }
         let destination = self.panes[destination_pane].tab().path.clone();
+        if let Some(terminal) = self.panes[destination_pane].tab().terminal.clone() {
+            let result = terminal_drop_text(&sources, &destination)
+                .and_then(|text| terminal.update(cx, |view, _| view.insert_dropped_text(&text)));
+            self.notice = result.err();
+            cx.notify();
+            return;
+        }
         if sources.is_empty() || sources.iter().any(|source| source == &destination) {
             self.notice = Some("Choose items that are not the destination folder itself.".into());
             cx.notify();
@@ -90,7 +96,6 @@ impl Workspace {
             if count == 1 { "" } else { "s" },
             destination.display()
         ));
-        self.transfer_drawer = true;
         self.run_transfers(cx);
     }
 
@@ -129,21 +134,40 @@ impl Workspace {
                                 .is_none_or(|old| old.state != job.state)
                         });
                         this.jobs = jobs;
-                        if let Some(OperationDialog::Conflict(id, ..) | OperationDialog::Replace(id, ..)) = &this.operation_dialog {
-                            if !this.jobs.iter().any(|job| job.id == *id && matches!(job.state, JobState::AwaitingConflict { .. })) {
+                        if let Some(
+                            OperationDialog::Conflict(id, ..) | OperationDialog::Replace(id, ..),
+                        ) = &this.operation_dialog
+                        {
+                            if !this.jobs.iter().any(|job| {
+                                job.id == *id
+                                    && matches!(job.state, JobState::AwaitingConflict { .. })
+                            }) {
                                 this.operation_dialog = None;
                                 this.activate(this.active, window, cx);
                             }
                         }
 
-                        if this.operation_dialog.is_none() && this.connection_screen.is_none()
-                            && !this.settings_open && !this.palette && !this.shortcuts_open {
-                            if let Some((id, source, destination)) = this.jobs.iter().find_map(|job| {
-                                if let JobState::AwaitingConflict { source, destination } = &job.state {
-                                    Some((job.id, source.clone(), destination.clone()))
-                                } else { None }
-                            }) {
-                                this.operation_dialog = Some(OperationDialog::Conflict(id, source, destination));
+                        if this.operation_dialog.is_none()
+                            && this.connection_screen.is_none()
+                            && !this.settings_open
+                            && !this.palette
+                            && !this.shortcuts_open
+                        {
+                            if let Some((id, source, destination)) =
+                                this.jobs.iter().find_map(|job| {
+                                    if let JobState::AwaitingConflict {
+                                        source,
+                                        destination,
+                                    } = &job.state
+                                    {
+                                        Some((job.id, source.clone(), destination.clone()))
+                                    } else {
+                                        None
+                                    }
+                                })
+                            {
+                                this.operation_dialog =
+                                    Some(OperationDialog::Conflict(id, source, destination));
                                 this.operation_focus.focus(window, cx);
                                 cx.notify();
                             }
@@ -335,7 +359,6 @@ impl Workspace {
             }
         }
         self.operation_dialog = None;
-        self.transfer_drawer = true;
         self.activate(self.active, window, cx);
     }
     fn run_transfers(&mut self, cx: &mut Context<Self>) {
@@ -380,61 +403,70 @@ impl Workspace {
                 "Confirm replace",
             ),
         };
-        let panel = div()
-            .track_focus(&self.operation_focus)
-            .key_context("OperationConfirm")
-            .on_action(cx.listener(|this, _: &ConfirmOperation, window, cx| {
-                this.submit_operation(window, cx);
-            }))
-            .flex_none()
-            .p_3()
-            .bg(rgb(theme.dialog))
-            .border_t_1()
-            .border_color(rgb(theme.accent))
-            .child(div().text_color(rgb(theme.accent)).child(title))
-            .child(
-                div()
-                    .id("operation-paths")
-                    .max_h(px(150.))
-                    .overflow_y_scroll()
-                    .children(paths.into_iter().map(|path| div().py_1().child(path))),
-            )
-            .when(input, |d| d.child(Input::new(&self.operation_input)))
-            .child(
-                div()
-                    .mt_2()
-                    .flex()
-                    .gap_4()
-                    .child(
-                        Button::new("confirm-operation")
-                            .label(format!("{label} · Enter"))
-                            .accessibility_label(label)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
+        let panel =
+            div()
+                .track_focus(&self.operation_focus)
+                .key_context("OperationConfirm")
+                .on_action(cx.listener(|this, _: &ConfirmOperation, window, cx| {
+                    this.submit_operation(window, cx);
+                }))
+                .flex_none()
+                .p_3()
+                .bg(rgb(theme.dialog))
+                .border_t_1()
+                .border_color(rgb(theme.accent))
+                .child(div().text_color(rgb(theme.accent)).child(title))
+                .child(
+                    div()
+                        .id("operation-paths")
+                        .max_h(px(150.))
+                        .overflow_y_scroll()
+                        .children(paths.into_iter().map(|path| div().py_1().child(path))),
+                )
+                .when(input, |d| d.child(Input::new(&self.operation_input)))
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .gap_4()
+                        .child(
+                            Button::new("confirm-operation")
+                                .label(format!("{label} · Enter"))
+                                .accessibility_label(label)
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     this.submit_operation(window, cx)
-                                }),
-                            ),
+                                })),
+                        )
+                        .child(
+                            Button::new("cancel-operation")
+                                .ghost()
+                                .label("Cancel · Esc")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.operation_dialog = None;
+                                    this.activate(this.active, window, cx);
+                                })),
+                        ),
+                )
+                .when_some(self.notice.as_ref(), |panel, notice| {
+                    panel.child(
+                        div()
+                            .mt_2()
+                            .text_color(rgb(theme.warning))
+                            .child(notice.clone()),
                     )
-                    .child(
-                        Button::new("cancel-operation")
-                            .ghost()
-                            .label("Cancel · Esc")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.operation_dialog = None;
-                                this.activate(this.active, window, cx);
-                            })),
-                    ),
-            )
-            .when_some(self.notice.as_ref(), |panel, notice| {
-                panel.child(div().mt_2().text_color(rgb(theme.warning)).child(notice.clone()))
-            });
+                });
         let weak = cx.entity().downgrade();
         gpui_kit::base::Dialog::new(cx)
             .focus_handle(self.operation_focus.clone())
             .on_ok(|_, _, _| false)
             .close_on_backdrop_press(false)
-            .popup(gpui_kit::base::DialogPopup::new()
-                .w(px(720.)).max_w(gpui::relative(0.95)).rounded_lg().child(panel))
+            .popup(
+                gpui_kit::base::DialogPopup::new()
+                    .w(px(720.))
+                    .max_w(gpui::relative(0.95))
+                    .rounded_lg()
+                    .child(panel),
+            )
             .backdrop(div().size_full().bg(rgba(0x00000080)))
             .on_open_change(move |open, _, window, cx| {
                 if !open {
@@ -447,11 +479,24 @@ impl Workspace {
             })
             .into_any_element()
     }
-    fn render_conflict_modal(&self, id: JobId, source: &Location, destination: &Location, cx: &mut Context<Self>) -> AnyElement {
+    fn render_conflict_modal(
+        &self,
+        id: JobId,
+        source: &Location,
+        destination: &Location,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = self.colors;
-        let can_replace = self.jobs.iter().find(|job| job.id == id).is_some_and(|job|
-            source.is_local() && destination.is_local() && job.plan.sources.iter().all(Location::is_local)
-                && job.plan.destination.as_ref().is_none_or(Location::is_local));
+        let can_replace = self
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .is_some_and(|job| {
+                source.is_local()
+                    && destination.is_local()
+                    && job.plan.sources.iter().all(Location::is_local)
+                    && job.plan.destination.as_ref().is_none_or(Location::is_local)
+            });
         let source = source.clone();
         let destination = destination.clone();
         let panel = div().track_focus(&self.operation_focus).key_context("TransferConflict")
@@ -475,10 +520,20 @@ impl Workspace {
                     this.operation_focus.focus(window, cx);
                     cx.notify();
                 }))));
-        gpui_kit::base::Dialog::new(cx).focus_handle(self.operation_focus.clone())
-            .on_ok(|_, _, _| false).close_on_escape(false).close_on_backdrop_press(false)
-            .popup(gpui_kit::base::DialogPopup::new().w(px(720.)).max_w(gpui::relative(0.95)).rounded_lg().child(panel))
-            .backdrop(div().size_full().bg(rgba(0x00000080))).into_any_element()
+        gpui_kit::base::Dialog::new(cx)
+            .focus_handle(self.operation_focus.clone())
+            .on_ok(|_, _, _| false)
+            .close_on_escape(false)
+            .close_on_backdrop_press(false)
+            .popup(
+                gpui_kit::base::DialogPopup::new()
+                    .w(px(720.))
+                    .max_w(gpui::relative(0.95))
+                    .rounded_lg()
+                    .child(panel),
+            )
+            .backdrop(div().size_full().bg(rgba(0x00000080)))
+            .into_any_element()
     }
     pub(super) fn render_transfers(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.colors;
@@ -492,11 +547,7 @@ impl Workspace {
             .bg(rgb(theme.surface))
             .border_t_1()
             .border_color(rgb(theme.border))
-            .child(
-                div()
-                    .text_color(rgb(theme.accent))
-                    .child("Transfers · ⌘J Hide"),
-            )
+            .child(div().text_color(rgb(theme.accent)).child("Log · ⌘J Hide"))
             .when(self.jobs.is_empty(), |d| {
                 d.child("No jobs queued. F5 Copy · F6 Move · ⌘⇧N New folder")
             })
@@ -552,7 +603,11 @@ impl Workspace {
                 if let Some(current) = &job.current {
                     row = row.child(div().text_color(rgb(theme.muted)).child(current.display()));
                 }
-                if let Some(error) = job.error.as_ref().filter(|_| !matches!(job.state, JobState::AwaitingConflict { .. })) {
+                if let Some(error) = job
+                    .error
+                    .as_ref()
+                    .filter(|_| !matches!(job.state, JobState::AwaitingConflict { .. }))
+                {
                     row = row.child(div().text_color(rgb(theme.error)).child(error.to_string()));
                 }
                 if let JobState::AwaitingConflict {
@@ -562,13 +617,19 @@ impl Workspace {
                 {
                     let source = source.clone();
                     let destination = destination.clone();
-                    row = row.child(Button::new(("review-conflict", id)).label("Review conflict…")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.operation_dialog = Some(OperationDialog::Conflict(id, source.clone(), destination.clone()));
-                            this.operation_focus.focus(window, cx);
-                            cx.notify();
-                        })));
-
+                    row = row.child(
+                        Button::new(("review-conflict", id))
+                            .label("Review conflict…")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.operation_dialog = Some(OperationDialog::Conflict(
+                                    id,
+                                    source.clone(),
+                                    destination.clone(),
+                                ));
+                                this.operation_focus.focus(window, cx);
+                                cx.notify();
+                            })),
+                    );
                 }
                 if !job.journal.is_empty() {
                     row = row.children(job.journal.iter().map(|item| {
@@ -592,6 +653,31 @@ impl Workspace {
                 row
             }))
     }
+}
+
+fn terminal_drop_text(sources: &[Location], destination: &Location) -> Result<String, String> {
+    if sources.is_empty() {
+        return Err("No files were dropped.".into());
+    }
+    let mut arguments = Vec::with_capacity(sources.len());
+    for source in sources {
+        let path = match (source, destination) {
+            (Location::Local(path), Location::Local(_)) if path.is_absolute() => path
+                .to_str()
+                .ok_or("This filename cannot be represented as terminal text.")?,
+            (Location::Sftp { connection, path }, Location::Sftp { connection: target, .. })
+                if connection == target && path.starts_with('/') => path.as_str(),
+            _ => return Err("Drop local files into a local terminal, or SFTP files into a terminal for the same connection.".into()),
+        };
+        if path.chars().any(char::is_control) {
+            return Err(
+                "Filenames containing control characters cannot be inserted into a terminal."
+                    .into(),
+            );
+        }
+        arguments.push(format!("'{}'", path.replace('\'', "'\\''")));
+    }
+    Ok(format!("{} ", arguments.join(" ")))
 }
 impl Workspace {
     pub(super) fn decide_conflict(
