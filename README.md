@@ -33,6 +33,18 @@ cargo run --locked
 open dist/Excavator.app
 ```
 
+On Linux, build the native binary with:
+
+```sh
+./scripts/build-linux.sh
+./target/release/excavator
+```
+
+Linux stores non-secret settings under `${XDG_CONFIG_HOME:-~/.config}/excavator`
+and uses `xdg-open` for explicitly opened local files. Remote connection
+credentials remain unavailable until a Linux OS credential-store adapter is
+added; no plaintext fallback is used.
+
 The script creates an ad-hoc signed Apple Silicon development bundle, not a
 notarized release. It converts `assets/excavator-icon.png` into the standard
 macOS icon sizes and bundles `Excavator.icns` with its plist registration.

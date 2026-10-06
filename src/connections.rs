@@ -206,10 +206,17 @@ pub fn new_id() -> String {
     )
 }
 fn path() -> Result<PathBuf, String> {
-    Ok(
-        PathBuf::from(std::env::var_os("HOME").ok_or("Home directory is unavailable")?)
-            .join("Library/Application Support/Excavator/connections.json"),
-    )
+    #[cfg(target_os = "macos")]
+    let directory = PathBuf::from(std::env::var_os("HOME").ok_or("Home directory is unavailable")?)
+        .join("Library/Application Support/Excavator");
+    #[cfg(not(target_os = "macos"))]
+    let directory = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/".into())).join(".config")
+        })
+        .join("excavator");
+    Ok(directory.join("connections.json"))
 }
 fn read_store() -> Result<Store, String> {
     let bytes = match fs::read(path()?) {
