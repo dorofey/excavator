@@ -281,3 +281,8 @@ signature were verified against the committed Sparkle public key. The feed uses
 the full archive and preserves all prior release entries. Native selection/drop
 acceptance and update installation/relaunch remain pending. Signing is ad hoc;
 the bundle is not notarized.
+
+0.2.3 prerelease published with the signed full ZIP and checksum:
+https://github.com/dorofey/excavator/releases/tag/v0.2.3
+Source tag v0.2.3 points to 9baea04. Uploaded archive SHA256 matches the local
+verified archive. Live upgrade installation/relaunch remains unverified.
