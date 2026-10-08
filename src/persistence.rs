@@ -2,6 +2,10 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
 };
 
@@ -120,9 +124,18 @@ impl Default for Preferences {
     }
 }
 
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 static SAVE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn settings_path() -> Result<PathBuf, String> {
+    if let Some(directory) = std::env::var_os("EXCAVATOR_CONFIG_DIR") {
+        let directory = PathBuf::from(directory);
+        if !directory.is_absolute() {
+            return Err("EXCAVATOR_CONFIG_DIR must be an absolute directory".into());
+        }
+        return Ok(directory.join("preferences.json"));
+    }
     let home = std::env::var_os("HOME").ok_or("Home directory is unavailable")?;
     Ok(PathBuf::from(home).join("Library/Application Support/Excavator/preferences.json"))
 }
@@ -153,8 +166,46 @@ pub fn load_from_path(path: &Path) -> (Preferences, Option<String>) {
 }
 
 pub fn save(settings: &Preferences) -> Result<(), String> {
-    let path = settings_path()?;
-    save_to_path(&path, settings)
+    save_with_favorite_mutations(settings, &[]).map(|_| ())
+}
+
+/// Save a UI snapshot while merging explicit favorite intents with the latest disk state.
+pub fn save_with_favorite_mutations(
+    settings: &Preferences,
+    mutations: &[(PathBuf, bool)],
+) -> Result<Vec<PathBuf>, String> {
+    save_with_favorite_mutations_at(&settings_path()?, settings, mutations)
+}
+
+pub fn save_with_favorite_mutations_at(
+    path: &Path,
+    settings: &Preferences,
+    mutations: &[(PathBuf, bool)],
+) -> Result<Vec<PathBuf>, String> {
+    if mutations.iter().any(|(path, _)| !path.is_absolute()) {
+        return Err("Favorites must be absolute local paths".into());
+    }
+    let _guard = SAVE_LOCK
+        .lock()
+        .map_err(|_| "Preferences save lock failed")?;
+    let _file_guard = preferences_lock(path)?;
+    let mut merged = settings.clone();
+    merged.favorites = match fs::read(path) {
+        Ok(bytes) => decode(&bytes)?.favorites,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => settings.favorites.clone(),
+        Err(error) => return Err(format!("Cannot read preferences: {error}")),
+    };
+    for (path, add) in mutations {
+        if *add {
+            if !merged.favorites.contains(path) {
+                merged.favorites.push(path.clone());
+            }
+        } else {
+            merged.favorites.retain(|existing| existing != path);
+        }
+    }
+    save_locked(path, &merged)?;
+    Ok(merged.favorites)
 }
 
 fn decode(bytes: &[u8]) -> Result<Preferences, String> {
@@ -190,6 +241,46 @@ fn decode(bytes: &[u8]) -> Result<Preferences, String> {
 /// Atomic explicit-path save for fixtures and background callers. This validates
 /// both the candidate and any existing file before creating a staging file.
 pub fn save_to_path(path: &Path, settings: &Preferences) -> Result<(), String> {
+    let _guard = SAVE_LOCK
+        .lock()
+        .map_err(|_| "Preferences save lock failed")?;
+    let _file_guard = preferences_lock(path)?;
+    save_locked(path, settings)
+}
+
+fn preferences_lock(path: &Path) -> Result<fs::File, String> {
+    let parent = path.parent().ok_or("Invalid preferences path")?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Cannot create preferences directory: {error}"))?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path.with_extension("json.lock"))
+        .map_err(|error| format!("Cannot open preferences lock: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Cannot inspect preferences lock: {error}"))?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(
+            "Preferences lock must be an owned file without group/public write permission".into(),
+        );
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!(
+            "Cannot lock preferences: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(file)
+}
+
+fn save_locked(path: &Path, settings: &Preferences) -> Result<(), String> {
     if settings.version != 2 {
         return Err(
             "Only preferences version 2 may be saved; load older settings to migrate first".into(),
@@ -243,6 +334,168 @@ pub fn save_to_path(path: &Path, settings: &Preferences) -> Result<(), String> {
             }
             Err(format!("Cannot save preferences: {error}"))
         }
+    }
+}
+
+/// Change only favorites in the latest settings. Call on a background worker.
+pub fn update_favorite(favorite: &Path, add: bool) -> Result<(Vec<PathBuf>, bool), String> {
+    update_favorite_at(&settings_path()?, favorite, add)
+}
+
+pub fn update_favorite_at(
+    path: &Path,
+    favorite: &Path,
+    add: bool,
+) -> Result<(Vec<PathBuf>, bool), String> {
+    if !favorite.is_absolute() {
+        return Err("Favorites must be absolute local paths".into());
+    }
+    let _guard = SAVE_LOCK
+        .lock()
+        .map_err(|_| "Preferences save lock failed")?;
+    let _file_guard = preferences_lock(path)?;
+    let (mut settings, warning) = load_from_path(path);
+    if let Some(error) = warning {
+        return Err(error);
+    }
+    let changed = if add {
+        if settings
+            .favorites
+            .iter()
+            .any(|existing| existing == favorite)
+        {
+            false
+        } else {
+            settings.favorites.push(favorite.to_path_buf());
+            true
+        }
+    } else {
+        let original = settings.favorites.len();
+        settings.favorites.retain(|existing| existing != favorite);
+        original != settings.favorites.len()
+    };
+    if changed {
+        save_locked(path, &settings)?;
+    }
+    Ok((settings.favorites, changed))
+}
+
+#[cfg(test)]
+mod favorite_tests {
+    use super::*;
+    #[test]
+    fn stale_desktop_snapshots_preserve_tui_favorites_and_apply_ordered_intents() {
+        let dir = std::env::temp_dir().join(format!(
+            "excavator-favorite-merge-{}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("preferences.json");
+        let old = PathBuf::from("/tmp/old");
+        let external = PathBuf::from("/tmp/tui-added");
+        let desktop = PathBuf::from("/tmp/desktop-added");
+        let mut snapshot = Preferences::default();
+        snapshot.favorites = vec![old.clone()];
+        save_to_path(&file, &snapshot).unwrap();
+        update_favorite_at(&file, &external, true).unwrap();
+        snapshot.show_hidden = true;
+        let favorites = save_with_favorite_mutations_at(&file, &snapshot, &[]).unwrap();
+        assert_eq!(favorites, vec![old.clone(), external.clone()]);
+        assert!(load_from_path(&file).0.show_hidden);
+        update_favorite_at(&file, &old, false).unwrap();
+        let favorites =
+            save_with_favorite_mutations_at(&file, &snapshot, &[(desktop.clone(), true)]).unwrap();
+        assert_eq!(favorites, vec![external.clone(), desktop.clone()]);
+        let favorites = save_with_favorite_mutations_at(
+            &file,
+            &snapshot,
+            &[
+                (old.clone(), true),
+                (old.clone(), false),
+                (external.clone(), false),
+            ],
+        )
+        .unwrap();
+        assert_eq!(favorites, vec![desktop]);
+        let corrupt = b"{invalid preferences";
+        fs::write(&file, corrupt).unwrap();
+        assert!(save_with_favorite_mutations_at(&file, &snapshot, &[(old, true)]).is_err());
+        assert_eq!(fs::read(&file).unwrap(), corrupt);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn concurrent_favorite_additions_preserve_each_other() {
+        let dir = std::env::temp_dir().join(format!(
+            "excavator-favorite-concurrent-{}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("preferences.json");
+        let mut settings = Preferences::default();
+        settings.favorites.clear();
+        save_to_path(&file, &settings).unwrap();
+        let workers: Vec<_> = (0..4)
+            .map(|i| {
+                let file = file.clone();
+                std::thread::spawn(move || {
+                    update_favorite_at(&file, Path::new(&format!("/tmp/favorite-{i}")), true)
+                        .unwrap()
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let (settings, error) = load_from_path(&file);
+        assert!(error.is_none());
+        assert_eq!(settings.favorites.len(), 4);
+        for i in 0..4 {
+            assert!(
+                settings
+                    .favorites
+                    .contains(&PathBuf::from(format!("/tmp/favorite-{i}")))
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn mutations_preserve_latest_settings_and_refuse_invalid_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "excavator-favorites-{}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("preferences.json");
+        let mut settings = Preferences::default();
+        settings.favorites.clear();
+        settings.show_hidden = true;
+        settings.vim_mode = true;
+        settings.left = PathBuf::from("/tmp/current-left");
+        settings.appearance.font_size = 17.0;
+        save_to_path(&file, &settings).unwrap();
+        let favorite = Path::new("/tmp/favorite");
+        assert!(update_favorite_at(&file, favorite, true).unwrap().1);
+        assert!(!update_favorite_at(&file, favorite, true).unwrap().1);
+        let (reloaded, error) = load_from_path(&file);
+        assert!(error.is_none());
+        assert_eq!(reloaded.favorites, vec![favorite.to_path_buf()]);
+        assert_eq!(reloaded.left, settings.left);
+        assert_eq!(reloaded.appearance, settings.appearance);
+        assert!(reloaded.show_hidden && reloaded.vim_mode);
+        assert!(update_favorite_at(&file, favorite, false).unwrap().1);
+        assert!(load_from_path(&file).0.favorites.is_empty());
+        fs::write(&file, b"invalid JSON").unwrap();
+        assert!(update_favorite_at(&file, favorite, true).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"invalid JSON");
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        assert!(update_favorite_at(&file, favorite, true).is_err());
+        assert!(file.is_dir());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
 

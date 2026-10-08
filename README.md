@@ -353,6 +353,7 @@ To prepare the next release:
 1. Bump the package version in Cargo.toml/Cargo.lock and update CHANGELOG.md.
 2. Run `./scripts/package-release.sh`. It builds an optimized bundle, embeds
    Sparkle, creates the ZIP/checksum, signs it and updates `appcast.xml`.
+   Run `./scripts/package-tui-release.sh` for the separate TUI tarball/checksum.
 3. Review the changes and commit/tag the exact source used for the archive.
 4. Upload the archive/checksum to a draft release with that version's tag.
 5. Publish the release assets before pushing the updated appcast to `main`.
@@ -372,3 +373,97 @@ every two seconds; history collects while the popup is open and pauses when it
 closes. History stays in memory and is bounded to the most recent 120 samples.
 CPU 100% means one fully used core; memory is resident RAM for Excavator itself,
 excluding terminal subprocesses. No usage data is saved or sent anywhere.
+
+### Single-pane macOS TUI
+
+The optional Ratatui frontend has keyboard navigation, selection, saved SFTP/FTPS/S3
+connections, and reviewed transfers between running browser instances. Provider,
+Keychain and coordination work runs outside the terminal event loop.
+
+```sh
+cargo build --release --locked --no-default-features --features tui --bin excavator-tui
+./target/release/excavator-tui /path/to/folder
+```
+
+In Herdr, `F5` copies to an Excavator browser or an idle local shell pane;
+`F6` moves to an Excavator browser. A shell destination uses its detected working
+directory, shown for review and rechecked before copying. Shell panes running a
+foreground command (including SSH or an editor) are excluded.
+`Shift+F5/F6` enters a destination in the current provider. Use `:` to find
+**Copy left/right/up/down** or **Move left/right/up/down**. Directional discovery
+requires the caller's visible Herdr tab. Copy can target a shell in that tab; Move
+requires a browser.
+Standalone terminals support the explicit browser picker and manual paths.
+
+Dialogs use compact content-sized panels with highlighted destination rows and
+a separate keyboard footer; long inputs and large lists scroll within the panel.
+The Copy dialog combines the source review and destination selection. Choose
+Home, Downloads, Desktop, a saved local favorite, a detected pane or a custom
+local path. Arrow keys select cards, Tab switches to path editing, and Enter
+confirms the copy. PgUp/PgDn scroll the source list. The current-provider path
+card retains manual remote destinations; `Shift+F5` opens that path flow directly.
+Copy/Move progress appears in a bottom gauge with completed item counts,
+transferred bytes and final state. The gauge measures items, not byte percentage,
+and hides in very small terminals to preserve browser controls.
+
+`D` leaves remote browsing and returns to the last local folder. It cancels the
+listing request while approved transfers continue independently. `B` opens saved
+local favorites; choose with arrows or j/k, then Enter. `Enter` opens folders or
+regular local files in their default macOS app. Remote files and symlinks remain
+excluded. All three actions are also available in the command palette.
+
+`A` saves the current local folder as a favorite. In the `B` picker, `d` or Delete
+reviews removal; Enter confirms and Esc cancels. Removing a favorite removes
+the shortcut. Favorites remain shared with the desktop app, and edits preserve
+the other preferences.
+
+`s` cycles Name, Size and Modified sorting; `S` reverses ascending/descending
+order. The status shows ↑ or ↓, folders stay first, and the chosen direction
+remains when switching fields. Expanded trees, cursor and selection survive.
+
+In Connections (`c`), `g` opens group management: `n` adds, `e` or Enter renames,
+and `d` reviews removal. Group renaming updates its members. Removing a group
+moves its members to Ungrouped and preserves saved connections and credentials.
+Assign a connection using the editor's Group field. Favorite add/remove, sort
+direction and group management are also available in the command palette.
+
+For isolated configuration, set `EXCAVATOR_CONFIG_DIR` to an absolute directory.
+It overrides only the preferences and connection metadata directory; credentials
+still use Keychain. Without it, both interfaces use the normal Application Support
+directory.
+
+The listing is an expandable tree. `Right` expands a folder; `Left` collapses it
+or selects its parent. `Enter` opens a folder as the current location, and
+`Backspace` navigates to the parent location. Each folder loads on demand.
+Folder and file icons use [Nerd Fonts](https://www.nerdfonts.com/cheat-sheet);
+choose a Nerd Font Mono in your terminal to render them. The Kind column is removed.
+
+Use `F7` to create a folder, `F2` to rename one item, and `F8` to move local
+items to Trash. Remote F8 requires a permanent-deletion review. Names stay within
+the selected item's parent; folder creation uses the current location. Every
+operation is reviewed before it is queued.
+
+The TUI keyboard layer supports `j/k` and counts (`10j`), `gg/G` for first/last,
+`5G` for row 5, `h/l` for the tree, and `v/V` for visual range selection.
+`Esc` leaves visual mode, then clears selection on a second press. `yy` reviews
+Copy and `dd` reviews Trash/local or permanent deletion/remote; counts such as
+`3yy` select three rows when there is no explicit selection. `R` reviews rename.
+Use `Ctrl+D/U` for half-page movement, `Ctrl+O/I` for history, and `za/zo/zc`
+for toggle/expand/collapse tree. Herdr owns terminal panes and tabs.
+
+Use `/` or `f` to find a filename in visible tree rows, then `n`/`N` for
+next/previous matches. Search is literal and case-insensitive. `Ctrl+L` edits
+the current path. NORMAL/VISUAL mode and pending sequences appear in the status
+line. Text inputs and operation dialogs retain their normal typing controls.
+
+Use `c` for connections, `L` for the log, `X` to cancel a transfer, `?` for help,
+`Ctrl+L` to edit the current path, and `q` to quit. The log opens only on request.
+Connection secrets stay in macOS Keychain. Host-key changes require explicit review.
+Jobs belong to the source process; exiting cancels active and waiting jobs.
+Up to 16 jobs can be active or waiting; they execute in order. `L` shows their
+operation and unique job number. In Log, `x` cancels the active job and `X` cancels
+waiting jobs. Outside Log, `X` cancels the active job.
+
+FTPS browsing/downloads are supported. Uploads retain the shared provider's safe
+rejection when exclusive destination creation cannot be guaranteed. See
+[TUI-MACOS.md](TUI-MACOS.md) for evidence and remaining acceptance limits.

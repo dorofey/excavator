@@ -32,6 +32,11 @@ if Path(previous).exists():
         if number != version and number in old:
             channel.remove(item)
             channel.insert(index, old[number])
+    present = {item.findtext("{" + namespace + "}version")
+               for item in channel.findall("item")}
+    for number, item in old.items():
+        if number not in present:
+            channel.append(item)
     ET.indent(feed, space="    ")
     feed.write(current, encoding="utf-8", xml_declaration=True)
 PYFEED

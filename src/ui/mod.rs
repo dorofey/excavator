@@ -556,6 +556,7 @@ pub struct Workspace {
     preferences_writable: bool,
     preferences_loaded: bool,
     save_pending: bool,
+    pending_favorite_mutations: Vec<(PathBuf, bool)>,
     transfers: TransferManager,
     jobs: Vec<JobSnapshot>,
     transfer_drawer: bool,
@@ -890,6 +891,7 @@ impl Workspace {
             preferences_writable: false,
             preferences_loaded: isolated,
             save_pending: false,
+            pending_favorite_mutations: vec![],
             transfers: TransferManager::with_registry(registry.clone()),
             registry,
             jobs: vec![],
@@ -1133,20 +1135,38 @@ impl Workspace {
         }
         self.saving = true;
         let prefs = self.preferences.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { persistence::save(&prefs) });
+        let mutations = std::mem::take(&mut self.pending_favorite_mutations);
+        let task = cx.background_executor().spawn(async move {
+            let result = persistence::save_with_favorite_mutations(&prefs, &mutations);
+            (result, mutations)
+        });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let (result, mut mutations) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.saving = false;
                 match result {
-                    Ok(()) => {
+                    Ok(mut favorites) => {
+                        for (path, add) in &this.pending_favorite_mutations {
+                            if *add {
+                                if !favorites.contains(path) {
+                                    favorites.push(path.clone());
+                                }
+                            } else {
+                                favorites.retain(|favorite| favorite != path);
+                            }
+                        }
+                        this.preferences.favorites = favorites;
                         if this.preferences_writable {
                             this.notice = None;
                         }
                     }
-                    Err(error) => this.notice = Some(error),
+                    Err(error) => {
+                        mutations.append(&mut this.pending_favorite_mutations);
+                        this.pending_favorite_mutations = mutations;
+                        this.notice = Some(error);
+                        // Retry on the next explicit save, rather than looping on an error.
+                        this.save_pending = false;
+                    }
                 }
                 if this.save_pending {
                     this.save_pending = false;
@@ -1442,6 +1462,9 @@ impl Workspace {
                     return;
                 };
                 let path = path.clone();
+                if self.preferences_writable {
+                    self.pending_favorite_mutations.push((path.clone(), false));
+                }
                 self.preferences
                     .favorites
                     .retain(|favorite| favorite != &path);
@@ -1453,10 +1476,13 @@ impl Workspace {
                     return;
                 };
                 let path = path.clone();
+                if self.preferences_writable {
+                    self.pending_favorite_mutations.push((path.clone(), true));
+                }
                 if !self.preferences.favorites.contains(&path) {
                     self.preferences.favorites.push(path);
-                    self.persist(cx)
                 }
+                self.persist(cx)
             }
         }
         cx.notify();

@@ -286,3 +286,13 @@ the bundle is not notarized.
 https://github.com/dorofey/excavator/releases/tag/v0.2.3
 Source tag v0.2.3 points to 9baea04. Uploaded archive SHA256 matches the local
 verified archive. Live upgrade installation/relaunch remains unverified.
+
+## TUI favorites, sorting and groups (2026-10-08)
+
+- [x] Add/remove local favorites through worker saves with reviewed removal, duplicate-safe updates and shared preferences; preserve unrelated settings and simultaneous TUI additions.
+- [x] Support ascending/descending Name, Size and Modified sorting, preserving folders-first grouping, expanded-tree cursor and selection.
+- [x] Add/rename/remove connection groups with explicit removal review; rename member assignments and ungroup members without deleting connection records or credentials.
+- [x] Verify keyboard flows and restart persistence using disposable native PTYs; thirty library tests, combined GUI/TUI checking and release build passed. Renderer previews inspected.
+
+Shared desktop favorite-save integration has fixture coverage and compilation
+evidence; native desktop interaction for that save-path change remains unverified.

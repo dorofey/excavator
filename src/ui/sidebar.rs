@@ -324,7 +324,10 @@ impl Workspace {
         if !self.preferences_loaded || index >= self.preferences.favorites.len() {
             return;
         }
-        self.preferences.favorites.remove(index);
+        let path = self.preferences.favorites.remove(index);
+        if self.preferences_writable {
+            self.pending_favorite_mutations.push((path, false));
+        }
         self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1);
         self.persist(cx);
         cx.notify();

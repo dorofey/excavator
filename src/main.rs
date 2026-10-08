@@ -1,15 +1,10 @@
 use gpui_kit::{prelude::*, *};
 
+use excavator::{connections, domain, persistence, platform, providers, transfers};
+
 mod appearance;
-mod connections;
-mod credentials;
-mod domain;
 mod forklift;
-mod persistence;
-mod platform;
-mod providers;
 mod terminal;
-mod transfers;
 mod ui;
 mod updater;
 

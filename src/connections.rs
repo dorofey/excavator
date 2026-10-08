@@ -5,6 +5,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt},
+    },
     path::PathBuf,
     sync::{
         Mutex,
@@ -194,6 +198,60 @@ impl Default for Store {
 }
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Lock ordering is always process mutex, then the per-user file lock.
+/// Closing this descriptor releases flock, including when a process exits.
+fn metadata_lock() -> Result<fs::File, String> {
+    let metadata_path = path()?;
+    let parent = metadata_path
+        .parent()
+        .ok_or("Invalid connection metadata path")?;
+    fs::create_dir_all(parent).map_err(|_| "Cannot create connection metadata directory")?;
+    let directory =
+        fs::symlink_metadata(parent).map_err(|_| "Cannot inspect connection metadata directory")?;
+    if !directory.is_dir()
+        || directory.uid() != unsafe { libc::geteuid() }
+        || directory.mode() & 0o022 != 0
+    {
+        return Err(
+            "Connection metadata directory must be owned, without a symlink or group/public write permission".into(),
+        );
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent.join(".connections.lock"))
+        .map_err(|_| "Cannot open connection metadata lock")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Cannot inspect connection metadata lock")?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err("Connection metadata lock must be a private owned regular file".into());
+    }
+    let started = std::time::Instant::now();
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(file);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::WouldBlock && error.kind() != io::ErrorKind::Interrupted {
+            return Err("Cannot lock connection metadata".into());
+        }
+        if started.elapsed() >= std::time::Duration::from_secs(15) {
+            return Err(
+                "Another process is updating connection metadata; retry when it finishes".into(),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
 pub fn new_id() -> String {
     format!(
         "connection-{}-{}-{}",
@@ -206,6 +264,13 @@ pub fn new_id() -> String {
     )
 }
 fn path() -> Result<PathBuf, String> {
+    if let Some(directory) = std::env::var_os("EXCAVATOR_CONFIG_DIR") {
+        let directory = PathBuf::from(directory);
+        if !directory.is_absolute() {
+            return Err("EXCAVATOR_CONFIG_DIR must be an absolute directory".into());
+        }
+        return Ok(directory.join("connections.json"));
+    }
     Ok(
         PathBuf::from(std::env::var_os("HOME").ok_or("Home directory is unavailable")?)
             .join("Library/Application Support/Excavator/connections.json"),
@@ -271,12 +336,14 @@ pub fn load() -> Result<Vec<ConnectionRecord>, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     Ok(read_store()?.records)
 }
 pub fn load_groups() -> Result<Vec<String>, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     Ok(read_store()?.groups)
 }
 fn validate_group_name(name: &str) -> Result<(), String> {
@@ -294,7 +361,15 @@ pub fn save_group(name: &str) -> Result<Vec<String>, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     let mut store = read_store()?;
+    if store
+        .groups
+        .iter()
+        .any(|group| group != name && group.eq_ignore_ascii_case(name))
+    {
+        return Err("A group with that name already exists".into());
+    }
     if !store.groups.iter().any(|group| group == name) {
         store.groups.push(name.to_string());
         store.groups.sort_by_key(|group| group.to_lowercase());
@@ -307,12 +382,19 @@ pub fn rename_group(old: &str, new: &str) -> Result<(Vec<String>, Vec<Connection
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     let mut store = read_store()?;
+    rename_group_in_store(&mut store, old, new)?;
+    write_store(&store)?;
+    Ok((store.groups, store.records))
+}
+fn rename_group_in_store(store: &mut Store, old: &str, new: &str) -> Result<(), String> {
+    validate_group_name(new)?;
     if old != new
         && store
             .groups
             .iter()
-            .any(|group| group.eq_ignore_ascii_case(new))
+            .any(|group| *group != old && group.eq_ignore_ascii_case(new))
     {
         return Err("A group with that name already exists".into());
     }
@@ -326,14 +408,19 @@ pub fn rename_group(old: &str, new: &str) -> Result<(Vec<String>, Vec<Connection
         }
     }
     store.groups.sort_by_key(|group| group.to_lowercase());
-    write_store(&store)?;
-    Ok((store.groups, store.records))
+    Ok(())
 }
 pub fn delete_group(name: &str) -> Result<(Vec<String>, Vec<ConnectionRecord>), String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     let mut store = read_store()?;
+    delete_group_in_store(&mut store, name)?;
+    write_store(&store)?;
+    Ok((store.groups, store.records))
+}
+fn delete_group_in_store(store: &mut Store, name: &str) -> Result<(), String> {
     let Some(index) = store.groups.iter().position(|group| group == name) else {
         return Err("The connection group no longer exists".into());
     };
@@ -343,8 +430,7 @@ pub fn delete_group(name: &str) -> Result<(Vec<String>, Vec<ConnectionRecord>), 
             record.group.clear();
         }
     }
-    write_store(&store)?;
-    Ok((store.groups, store.records))
+    Ok(())
 }
 pub struct ImportOutcome {
     pub added: usize,
@@ -374,6 +460,7 @@ pub fn import_metadata(records: &[ConnectionRecord]) -> Result<ImportOutcome, St
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     let mut store = read_store()?;
     let mut added = 0;
     let mut duplicates = 0;
@@ -405,7 +492,84 @@ pub fn save(record: &ConnectionRecord, secret: &Option<ConnectionSecrets>) -> Re
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     let mut store = read_store()?;
+    save_locked(&mut store, record, secret)
+}
+/// Credential fields are password, access key, secret key, session token, and
+/// SSH passphrase. None preserves each field; Some("") explicitly clears it.
+pub fn save_with_patch(
+    record: &ConnectionRecord,
+    expected: Option<&ConnectionRecord>,
+    patch: [Option<String>; 5],
+) -> Result<(), String> {
+    record.validate()?;
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
+    let mut store = read_store()?;
+    match expected {
+        Some(expected) => {
+            if expected.id != record.id {
+                return Err("Connection ID changed during review".into());
+            }
+            require_matching_record(&store, expected)?;
+        }
+        None if store
+            .records
+            .iter()
+            .any(|existing| existing.id == record.id) =>
+        {
+            return Err("Connection ID already exists; reopen the connection".into());
+        }
+        None => {}
+    }
+    let secret = if patch.iter().any(Option::is_some) {
+        let mut secret = match credentials::get(&record.id)? {
+            Some(bytes) => serde_json::from_slice::<ConnectionSecrets>(&bytes).map_err(
+                |_| "Stored connection credentials are invalid; original credentials preserved",
+            )?,
+            None => ConnectionSecrets::default(),
+        };
+        let fields = [
+            &mut secret.password,
+            &mut secret.access_key,
+            &mut secret.secret_key,
+            &mut secret.session_token,
+            &mut secret.ssh_key_passphrase,
+        ];
+        for (field, replacement) in fields.into_iter().zip(patch) {
+            if let Some(replacement) = replacement {
+                *field = replacement;
+            }
+        }
+        Some(secret)
+    } else {
+        None
+    };
+    save_locked(&mut store, record, &secret)
+}
+
+fn require_matching_record(store: &Store, expected: &ConnectionRecord) -> Result<(), String> {
+    let current = store
+        .records
+        .iter()
+        .find(|record| record.id == expected.id)
+        .ok_or("Connection was removed during review")?;
+    if serde_json::to_vec(current).map_err(|_| "Cannot compare connection metadata")?
+        != serde_json::to_vec(expected).map_err(|_| "Cannot compare connection metadata")?
+    {
+        return Err("Connection settings changed during review; reopen the connection".into());
+    }
+    Ok(())
+}
+
+fn save_locked(
+    store: &mut Store,
+    record: &ConnectionRecord,
+    secret: &Option<ConnectionSecrets>,
+) -> Result<(), String> {
     let previous_secret = if secret.is_some() {
         Some(credentials::get(&record.id)?)
     } else {
@@ -425,7 +589,7 @@ pub fn save(record: &ConnectionRecord, secret: &Option<ConnectionSecrets>) -> Re
     } else {
         store.records.push(record.clone());
     }
-    if let Err(error) = write_store(&store) {
+    if let Err(error) = write_store(store) {
         if let Some(previous) = previous_secret {
             let restored = match previous {
                 Some(bytes) => credentials::set(&record.id, &bytes),
@@ -446,13 +610,29 @@ pub fn remove(id: &str) -> Result<(), String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     let mut store = read_store()?;
+    remove_locked(&mut store, id)
+}
+
+pub fn remove_if_matches(expected: &ConnectionRecord) -> Result<(), String> {
+    expected.validate()?;
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
+    let mut store = read_store()?;
+    require_matching_record(&store, expected)?;
+    remove_locked(&mut store, &expected.id)
+}
+
+fn remove_locked(store: &mut Store, id: &str) -> Result<(), String> {
     // If Keychain is locked retain the metadata so removal can be retried.
     let previous_secret = credentials::get(id)?;
     credentials::remove(id)?;
     store.records.retain(|record| record.id != id);
     store.known_hosts.remove(id);
-    if let Err(error) = write_store(&store) {
+    if let Err(error) = write_store(store) {
         if let Some(bytes) = previous_secret {
             return Err(match credentials::set(id, &bytes) {
                 Ok(()) => format!("{error}; removed credentials restored"),
@@ -481,6 +661,7 @@ pub fn known_host(record: &ConnectionRecord) -> Result<Option<String>, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     Ok(read_store()?
         .known_hosts
         .get(&record.id)
@@ -505,7 +686,17 @@ pub fn trust_host(record: &ConnectionRecord, fingerprint: &str) -> Result<(), St
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     let mut store = read_store()?;
+    if let Some(current) = store.records.iter().find(|current| current.id == record.id)
+        && (current.protocol != record.protocol
+            || current.host != record.host
+            || current.port != record.port)
+    {
+        return Err(
+            "Connection endpoint changed during host key review; inspect the host again".into(),
+        );
+    }
     if let Some(old) = store.known_hosts.get(&record.id) {
         if old.host.eq_ignore_ascii_case(&record.host)
             && old.port == record.port
@@ -531,7 +722,80 @@ pub fn forget_host(record: &ConnectionRecord) -> Result<(), String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
     let mut store = read_store()?;
     store.known_hosts.remove(&record.id);
     write_store(&store)
+}
+
+/// Atomically reset only the endpoint and fingerprint explicitly reviewed.
+pub fn forget_host_if_matches(
+    record: &ConnectionRecord,
+    expected_fingerprint: &str,
+) -> Result<(), String> {
+    record.validate()?;
+    if record.protocol != Protocol::Sftp {
+        return Err("Host key trust applies only to SFTP".into());
+    }
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Connection metadata lock failed")?;
+    let _file_guard = metadata_lock()?;
+    let mut store = read_store()?;
+    let current = store
+        .records
+        .iter()
+        .find(|current| current.id == record.id)
+        .ok_or("Connection was removed during host key review")?;
+    if current.protocol != record.protocol
+        || current.host != record.host
+        || current.port != record.port
+    {
+        return Err(
+            "Connection endpoint changed during host key review; inspect the host again".into(),
+        );
+    }
+    let trusted = store
+        .known_hosts
+        .get(&record.id)
+        .ok_or("Trusted key changed during review; inspect the host again")?;
+    if !trusted.host.eq_ignore_ascii_case(&record.host)
+        || trusted.port != record.port
+        || trusted.fingerprint != expected_fingerprint
+    {
+        return Err("Trusted key changed during review; inspect the host again".into());
+    }
+    store.known_hosts.remove(&record.id);
+    write_store(&store)
+}
+
+#[cfg(test)]
+mod group_management_tests {
+    use super::*;
+    #[test]
+    fn names_reject_blank_padding_and_controls() {
+        for name in ["", " padded", "padded ", "line\nbreak"] {
+            assert!(validate_group_name(name).is_err());
+        }
+        assert!(validate_group_name("Production").is_ok());
+    }
+    #[test]
+    fn rename_and_remove_keep_records_and_ungroup_members() {
+        let mut store = Store::default();
+        store.groups = vec!["Production".into(), "Staging".into()];
+        let mut record: ConnectionRecord = serde_json::from_value(serde_json::json!({"id":"fixture", "name":"Server", "protocol":"Sftp", "host":"example.test", "port":22, "username":"developer", "root":"/", "bucket":"", "region":"", "endpoint":"", "group":"Production"})).unwrap();
+        record.group = "Production".into();
+        store.records.push(record.clone());
+        assert!(rename_group_in_store(&mut store, "Production", "staging").is_err());
+        rename_group_in_store(&mut store, "Production", "PRODUCTION").unwrap();
+        assert_eq!(store.records[0].group, "PRODUCTION");
+        delete_group_in_store(&mut store, "PRODUCTION").unwrap();
+        record.group.clear();
+        assert_eq!(
+            serde_json::to_value(&store.records[0]).unwrap(),
+            serde_json::to_value(&record).unwrap()
+        );
+        assert_eq!(store.groups, vec!["Staging"]);
+        assert!(delete_group_in_store(&mut store, "PRODUCTION").is_err());
+    }
 }

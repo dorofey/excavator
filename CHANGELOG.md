@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0 — 2026-10-08
+
+### Added
+- Standalone macOS TUI with local and saved remote browsing, expandable file trees, Nerd Font icons, command palette and Vim-style keyboard controls.
+- Reviewed copy/move to another browser or an idle Herdr shell's current directory; queued jobs, conflict decisions, cancellation, Log and a bottom progress gauge.
+- Compact dialogs, a combined Copy review with local shortcuts and favorites, and connection editing/group management.
+- Favorite add/remove, ascending/descending sorting, Return to local, and explicit opening of regular local files in their default app.
+
+### Fixed
+- Preserve shared favorites when an already-open desktop app saves its workspace after a TUI edit. Serialize favorite edits across TUI processes and preserve unrelated preferences.
+
+### Verification
+- Thirty TUI/shared-library tests and native disposable-config terminal checks passed, including restart persistence, simultaneous favorite saves, every sort field in both directions, group edits and terminal restoration.
+- GUI/TUI release builds, desktop bundle signing, archive checksums and the Sparkle Ed25519 signature passed. Fresh remote transfer checks remain limited by coordination-socket restrictions; native desktop interaction for the shared-save change and default-app launching were not rechecked.
+- Apple Silicon prerelease; desktop bundle remains ad hoc signed and not notarized.
+
 ## 0.2.3 — 2026-10-06
 
 ### Added

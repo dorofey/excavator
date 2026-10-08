@@ -61,8 +61,11 @@ Ordinary Copy/Move may use the last explicitly chosen surviving destination;
 otherwise show the picker. Final keybindings must be checked against herdr,
 macOS terminal behavior and text-entry controls; show them in help.
 
-An adjacent shell/editor is not a file destination. Do not infer its directory
-from terminal output or inject `cp`, `mv` or shell commands into another pane.
+An adjacent idle local shell is a Copy destination when Herdr process-info reports
+its shell process in the foreground and an existing absolute working directory.
+Show that directory for review and recheck PID, pane identity and cwd before copying.
+Editors, SSH and other foreground programs are excluded; Move requires a browser.
+Do not infer directories from terminal output or inject file-operation commands.
 Only registered, responsive Excavator instances qualify for automatic targeting.
 Manual destination entry remains available outside herdr.
 
@@ -252,3 +255,70 @@ editing. Complete the milestone's checks, report exact evidence and limitations,
 then stop for review. On subsequent instructions continue the next milestone
 from this handoff. Use sequential work unless independent file ownership makes
 delegation clearly worthwhile; no particular model or agent CLI is required.
+
+## Implementation progress — 2026-10-07
+
+Milestone 1 shared-core boundary and minimal TUI entrypoint are implemented.
+GUI and GPUI-free TUI builds pass; macOS PTY and real herdr exits restore terminal
+state. See [TUI-MACOS.md](TUI-MACOS.md) for exact commands, adapter contract and
+remaining limitations. Milestone 2 is next; no desktop acceptance box was changed.
+
+### Milestone 2 — 2026-10-07
+
+Standalone local browser implemented with bounded asynchronous listing work,
+generation checks, metadata, cursor/multi-selection, history, path editing,
+refresh, sorting, hidden files, help and searchable commands. Live macOS PTY
+acceptance covered errors, empty/Unicode/large directories, resize, cancellation
+and stale-response outcomes. This volume rejects non-UTF-8 fixture names; native
+byte-path navigation remains unverified. Exact evidence: [TUI-MACOS.md](TUI-MACOS.md).
+Milestone 3 discovery/coordination is next. Desktop acceptance remains unchanged.
+
+### Integration continuation — 2026-10-07
+
+Implemented coordination, reviewed copy/move, source-owned progress/conflicts/log,
+remote browsing and the connection editor. Real Herdr directional copy, target
+navigation rejection, native PTY transfer/editor flows and disposable remote
+connections were exercised. Shared metadata now has cross-process serialization,
+atomic credential patches and reviewed save/remove/trust-reset checks. See
+TUI-MACOS.md for detailed evidence and unverified acceptance cases. Desktop
+CHECKLIST acceptance remains unchanged; source changes remain uncommitted.
+
+The TUI listing now removes Kind, uses Nerd Font icons, and supports lazy expandable
+folder trees with Right/Left. Enter still navigates and Backspace goes to the parent
+location. Native PTY tree and reviewed-transfer checks passed; see TUI-MACOS.md for
+selection/refresh semantics and the terminal-font visual verification limit.
+
+User-authorized shell Copy integration is implemented. Real Herdr fixture checks
+passed copy byte comparison, shell cwd-change rejection, foreground-command
+exclusion and Move exclusion. No personal files were transferred during verification.
+
+TUI parity slice now implements F7 create-folder, F2 rename, F8 local Trash /
+explicit remote-delete review, f/n/N filename search and a bounded16 FIFO job
+queue with independent provider registries. Native local operation/search/queued
+copy fixture checks passed; new remote destructive flows remain live-unverified.
+See TUI-MACOS.md for controls, provider limits and verification evidence.
+
+Vim-style TUI keyboard controls now include bounded counts, gg/G, v/V visual
+ranges, h/l and za/zo/zc trees, Ctrl+D/U paging, Ctrl+O/I history, yy/dd reviewed
+operations and R rename. Filename search uses / or f; path editing moved to
+Ctrl+L. Status preserves mode, pending keys and selected counts during transfers.
+
+2026-10-08: redesigned all TUI modals around a shared compact frame, selected
+picker cards, separate keyboard footer and visible scrolling input cursor.
+Renderer fixtures and independent PTY dialogs passed. The current sandbox blocks
+coordination socket startup, so live transfer-dialog routing recheck remains open.
+
+2026-10-08: ordinary/directional Copy now combines source review and destination
+cards in one confirmation. Local shortcuts and saved favorites accompany detected
+panes and distinct custom-local/current-provider paths. Eleven TUI library tests,
+combined all-target checking and the release build passed; buffer previews were
+inspected. Live copy execution still needs a socket-permitted environment.
+
+2026-10-08: implemented TUI favorites editing (A add; B, d remove review), sort
+direction (s field; S reverse), and connection groups (c, g; n/e/d). Thirty library
+tests and native disposable-config PTYs passed, including restart persistence,
+two-process favorite saves, all sort fields in both directions, group CRUD and
+connection preservation. Shared desktop saves merge explicit favorite edits to
+preserve TUI changes; that GUI save wiring compiles and the merge has fixture
+coverage, but native desktop interaction was not rechecked. ForkLift import is
+outside this requested slice.
