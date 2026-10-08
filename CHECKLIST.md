@@ -296,3 +296,14 @@ verified archive. Live upgrade installation/relaunch remains unverified.
 
 Shared desktop favorite-save integration has fixture coverage and compilation
 evidence; native desktop interaction for that save-path change remains unverified.
+
+## 0.3.0 release (2026-10-08)
+
+- [x] Commit the macOS TUI and shared favorites changes, bump both binaries to 0.3.0 and push source/tag (`0d7f563`, `v0.3.0`).
+- [x] Build Apple Silicon desktop/TUI packages; verify desktop bundle signing, Sparkle Ed25519 signature, archive lengths and SHA256 checksums.
+- [x] Publish desktop ZIP and TUI tarball plus checksums as a GitHub prerelease; downloaded uploads match the verified local archives.
+- [x] Preserve all previous update-feed versions when generating the new feed.
+
+Release: https://github.com/dorofey/excavator/releases/tag/v0.3.0.
+Thirty library tests and packaged TUI native checks passed. Desktop signing is
+ad hoc, not notarized; live updater installation/relaunch remains unverified.

@@ -439,3 +439,11 @@ edits, so navigation in an already-open desktop window cannot replace TUI edits
 with its stale cache. Shared persistence tests exercise stale snapshots, ordered
 intents and corrupt-file preservation. GUI integration compiles; native desktop
 interaction was not rechecked for this save-path change.
+
+### 0.3.0 distribution (2026-10-08)
+
+Published source tag `v0.3.0` at `0d7f563` and an Apple Silicon TUI tarball with
+SHA256 checksum alongside the desktop ZIP. Both archive uploads were downloaded
+and matched against the locally verified files. The packaged TUI passed native
+management/restart/terminal-restoration checks. Release:
+https://github.com/dorofey/excavator/releases/tag/v0.3.0.
